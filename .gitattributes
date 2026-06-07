@@ -1,0 +1,17 @@
+# Default: normalize text line endings on commit
+* text=auto
+
+# Files that MUST keep LF (executed inside Linux containers)
+*.sh        text eol=lf
+*.py        text eol=lf
+*.conf      text eol=lf
+*.properties text eol=lf
+*.xml       text eol=lf
+Dockerfile  text eol=lf
+entrypoint.sh text eol=lf
+
+# Binary
+*.docx      binary
+*.png       binary
+*.jpg       binary
+*.csv       text eol=lf

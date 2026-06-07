@@ -1,0 +1,21 @@
+# dataset
+dataset/*.csv
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# spark / ivy
+spark-warehouse/
+.ivy2/
+metastore_db/
+derby.log
+
+# env overrides
+.env
+.env.local
+
+# local-only documents (NOT pushed to GitHub)
+Tài liệu/
