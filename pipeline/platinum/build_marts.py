@@ -3,8 +3,11 @@ Write OVERWRITE to database `platinum`."""
 import sys
 sys.path.insert(0, "/opt/pipeline")
 
-from pyspark.sql import functions as F
+from pyspark.sql import functions as F, Window
 from common.spark_session import get_spark, ensure_databases
+
+# orders in these statuses never produced revenue -> excluded from $ marts
+NON_REVENUE_STATUSES = ["canceled", "unavailable"]
 
 
 def _write(df, table):
@@ -14,7 +17,8 @@ def _write(df, table):
 
 
 def mart_monthly_revenue(spark):
-    fo = spark.table("gold.fact_orders")
+    fo = (spark.table("gold.fact_orders")
+               .filter(~F.col("order_status").isin(NON_REVENUE_STATUSES)))
     dd = spark.table("gold.dim_date")
     df = (fo.join(dd, fo.purchase_date_id == dd.date_id, "inner")
             .groupBy("year", "month")
@@ -39,7 +43,12 @@ def mart_state_performance(spark):
 def mart_category_ranking(spark):
     fi = spark.table("gold.fact_order_items")
     dp = spark.table("gold.dim_product")
-    df = (fi.join(dp, "product_id", "inner")
+    # exclude items belonging to canceled/unavailable orders from revenue
+    valid_orders = (spark.table("gold.fact_orders")
+                         .filter(~F.col("order_status").isin(NON_REVENUE_STATUSES))
+                         .select("order_id"))
+    df = (fi.join(valid_orders, "order_id", "inner")
+            .join(dp, "product_id", "inner")
             .groupBy("category_name_english")
             .agg(F.round(F.sum("price"), 2).alias("revenue"),
                  F.count("*").alias("items_sold"))
@@ -49,11 +58,16 @@ def mart_category_ranking(spark):
 
 def mart_delivery_kpi(spark):
     fo = spark.table("gold.fact_orders")
+    # late_delivery_rate is only defined over orders that were actually
+    # delivered; undelivered orders must not dilute the denominator.
+    is_delivered = ((F.col("order_status") == "delivered")
+                    | F.col("delivery_days").isNotNull())
+    delivered_cnt = F.sum(is_delivered.cast("int"))
+    late_cnt = F.sum(F.when(is_delivered & F.col("is_late_delivery"), 1).otherwise(0))
     df = fo.agg(
         F.count("*").alias("total_orders"),
         F.round(F.avg("delivery_days"), 2).alias("avg_delivery_days"),
-        F.round(F.sum(F.col("is_late_delivery").cast("int")) / F.count("*") * 100, 2)
-         .alias("late_delivery_rate_pct"),
+        F.round(late_cnt / delivered_cnt * 100, 2).alias("late_delivery_rate_pct"),
     )
     _write(df, "mart_delivery_kpi")
 
@@ -62,11 +76,26 @@ def mart_review_by_category(spark):
     fr = spark.table("gold.fact_reviews")
     fi = spark.table("gold.fact_order_items")
     dp = spark.table("gold.dim_product")
-    df = (fr.join(fi, "order_id", "inner")
-            .join(dp, "product_id", "inner")
+
+    # A review belongs to an order, but an order can span many items across
+    # several categories. Joining reviews x items directly fans each review out
+    # once per item (wrong grain), inflating review_count and skewing the avg.
+    # Fix: collapse every order to a single representative category first (the
+    # dominant category by item count, deterministic tiebreak), THEN join the
+    # review so each review contributes to exactly one category.
+    items_cat = (fi.join(dp, "product_id", "inner")
+                   .groupBy("order_id", "category_name_english")
+                   .agg(F.count("*").alias("item_cnt")))
+    rank = Window.partitionBy("order_id").orderBy(
+        F.desc("item_cnt"), F.asc("category_name_english"))
+    order_cat = (items_cat.withColumn("rn", F.row_number().over(rank))
+                          .filter(F.col("rn") == 1)
+                          .select("order_id", "category_name_english"))
+
+    df = (fr.join(order_cat, "order_id", "inner")
             .groupBy("category_name_english")
             .agg(F.round(F.avg("review_score"), 2).alias("avg_review_score"),
-                 F.count("*").alias("review_count"))
+                 F.countDistinct("review_id").alias("review_count"))
             .orderBy(F.desc("avg_review_score")))
     _write(df, "mart_review_by_category")
 

@@ -65,8 +65,14 @@ def fact_reviews(spark):
 
 def fact_payments(spark):
     p = spark.table("silver.order_payments")
-    df = p.select("order_id", "payment_sequential", "payment_type",
-                  "payment_installments", "payment_value")
+    # connect the fact to dim_payment_type via its surrogate key so the
+    # dimension is no longer dangling (every payment_type -> payment_type_id).
+    # build_dimensions runs before build_facts, so the dim already exists.
+    dim = spark.table("gold.dim_payment_type")
+    df = (p.join(dim, "payment_type", "left")
+           .select("order_id", "payment_sequential",
+                   "payment_type_id", "payment_type",
+                   "payment_installments", "payment_value"))
     _write(df, "fact_payments")
 
 

@@ -13,8 +13,19 @@ CSV_TO_TABLE = {
     "product_category_name_translation.csv": "category_translation",
 }
 
-# tables partitioned by ingest date in Bronze (large fact-like tables)
-BRONZE_PARTITIONED = {"orders", "order_items", "order_payments", "order_reviews"}
+# tables partitioned by ingest date in Bronze (large fact-like tables).
+# NOTE: `orders` is handled by the incremental path below (partitioned by the
+# business month instead of the ingest day) so it is intentionally NOT here.
+BRONZE_PARTITIONED = {"order_items", "order_payments", "order_reviews"}
+
+# tables ingested incrementally (append + watermark) instead of full overwrite
+INCREMENTAL_TABLES = {"orders"}
+
+# business event-time column used as the high-watermark per incremental table
+WATERMARK_COLUMN = {"orders": "order_purchase_timestamp"}
+
+# Iceberg meta table holding the high-watermark per source table
+WATERMARK_TABLE = "meta.ingest_watermark"
 
 # databases (namespaces) used across the lakehouse
 DATABASES = ["bronze", "silver", "gold", "platinum", "meta"]

@@ -12,9 +12,11 @@ def main():
 
     fact_orders = spark.table("gold.fact_orders")
     fact_items = spark.table("gold.fact_order_items")
+    fact_payments = spark.table("gold.fact_payments")
     dim_customer = spark.table("gold.dim_customer")
     dim_product = spark.table("gold.dim_product")
     dim_seller = spark.table("gold.dim_seller")
+    dim_payment_type = spark.table("gold.dim_payment_type")
 
     # no orphan FKs
     results.append(dq.expect_no_orphans(
@@ -29,6 +31,9 @@ def main():
     results.append(dq.expect_no_orphans(
         fact_items, "seller_id", dim_seller, "seller_id",
         table="gold.fact_order_items", layer="gold"))
+    results.append(dq.expect_no_orphans(
+        fact_payments, "payment_type_id", dim_payment_type, "payment_type_id",
+        table="gold.fact_payments", layer="gold"))
 
     # measures / PKs
     results.append(dq.expect_column_not_null(dim_customer, "customer_id", table="gold.dim_customer", layer="gold"))

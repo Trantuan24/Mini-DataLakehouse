@@ -1,6 +1,10 @@
 """[Extension #3] Load raw Olist CSV files into Postgres `olist_source` schema
 to simulate an OLTP source system. Bronze can then ingest from this DB via JDBC.
 
+Unlike a quick `to_sql(if_exists="replace")` dump, this creates each table with
+an explicit DDL + PRIMARY KEY (proper OLTP shape) and then *appends* the rows.
+Tables are dropped/recreated first so the seed job stays idempotent.
+
 Run inside a container that has pandas + sqlalchemy + psycopg2 (the airflow image).
 This job does NOT need Spark."""
 import os
@@ -8,7 +12,7 @@ import sys
 import glob
 
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 DATASET_DIR = os.environ.get("DATASET_DIR", "/opt/dataset")
 PG_USER = os.environ.get("POSTGRES_USER", "airflow")
@@ -28,6 +32,134 @@ CSV_TO_TABLE = {
     "product_category_name_translation.csv": "category_translation",
 }
 
+# Explicit DDL with PRIMARY KEY for every table (OLTP-like source schema).
+# `geolocation` and `order_reviews` carry natural-key duplicates in the raw
+# Olist dump, so they get a surrogate serial PK to preserve every row while
+# still having a primary key (no table left without one).
+DDL = {
+    "orders": """
+        CREATE TABLE {s}.orders (
+            order_id varchar(32) PRIMARY KEY,
+            customer_id varchar(32) NOT NULL,
+            order_status varchar(20),
+            order_purchase_timestamp timestamp,
+            order_approved_at timestamp,
+            order_delivered_carrier_date timestamp,
+            order_delivered_customer_date timestamp,
+            order_estimated_delivery_date timestamp
+        )""",
+    "order_items": """
+        CREATE TABLE {s}.order_items (
+            order_id varchar(32) NOT NULL,
+            order_item_id integer NOT NULL,
+            product_id varchar(32),
+            seller_id varchar(32),
+            shipping_limit_date timestamp,
+            price numeric(12,2),
+            freight_value numeric(12,2),
+            PRIMARY KEY (order_id, order_item_id)
+        )""",
+    "customers": """
+        CREATE TABLE {s}.customers (
+            customer_id varchar(32) PRIMARY KEY,
+            customer_unique_id varchar(32) NOT NULL,
+            customer_zip_code_prefix integer,
+            customer_city varchar(64),
+            customer_state varchar(4)
+        )""",
+    "products": """
+        CREATE TABLE {s}.products (
+            product_id varchar(32) PRIMARY KEY,
+            product_category_name varchar(64),
+            product_name_lenght integer,
+            product_description_lenght integer,
+            product_photos_qty integer,
+            product_weight_g integer,
+            product_length_cm integer,
+            product_height_cm integer,
+            product_width_cm integer
+        )""",
+    "sellers": """
+        CREATE TABLE {s}.sellers (
+            seller_id varchar(32) PRIMARY KEY,
+            seller_zip_code_prefix integer,
+            seller_city varchar(64),
+            seller_state varchar(4)
+        )""",
+    "order_payments": """
+        CREATE TABLE {s}.order_payments (
+            order_id varchar(32) NOT NULL,
+            payment_sequential integer NOT NULL,
+            payment_type varchar(20),
+            payment_installments integer,
+            payment_value numeric(12,2),
+            PRIMARY KEY (order_id, payment_sequential)
+        )""",
+    "order_reviews": """
+        CREATE TABLE {s}.order_reviews (
+            review_pk bigserial PRIMARY KEY,
+            review_id varchar(32) NOT NULL,
+            order_id varchar(32) NOT NULL,
+            review_score integer,
+            review_comment_title varchar(128),
+            review_comment_message text,
+            review_creation_date timestamp,
+            review_answer_timestamp timestamp
+        )""",
+    "geolocation": """
+        CREATE TABLE {s}.geolocation (
+            geolocation_id bigserial PRIMARY KEY,
+            geolocation_zip_code_prefix integer,
+            geolocation_lat double precision,
+            geolocation_lng double precision,
+            geolocation_city varchar(64),
+            geolocation_state varchar(4)
+        )""",
+    "category_translation": """
+        CREATE TABLE {s}.category_translation (
+            product_category_name varchar(64) PRIMARY KEY,
+            product_category_name_english varchar(64)
+        )""",
+}
+
+# column type coercion so the appended values match the explicit DDL types
+TS_COLS = {
+    "orders": ["order_purchase_timestamp", "order_approved_at",
+               "order_delivered_carrier_date", "order_delivered_customer_date",
+               "order_estimated_delivery_date"],
+    "order_items": ["shipping_limit_date"],
+    "order_reviews": ["review_creation_date", "review_answer_timestamp"],
+}
+INT_COLS = {
+    "order_items": ["order_item_id"],
+    "customers": ["customer_zip_code_prefix"],
+    "products": ["product_name_lenght", "product_description_lenght",
+                 "product_photos_qty", "product_weight_g", "product_length_cm",
+                 "product_height_cm", "product_width_cm"],
+    "sellers": ["seller_zip_code_prefix"],
+    "order_payments": ["payment_sequential", "payment_installments"],
+    "order_reviews": ["review_score"],
+    "geolocation": ["geolocation_zip_code_prefix"],
+}
+NUMERIC_COLS = {
+    "order_items": ["price", "freight_value"],
+    "order_payments": ["payment_value"],
+    "geolocation": ["geolocation_lat", "geolocation_lng"],
+}
+
+
+def _coerce(df, table):
+    for c in TS_COLS.get(table, []):
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in INT_COLS.get(table, []):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+    for c in NUMERIC_COLS.get(table, []):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
 
 def main():
     url = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@postgres:5432/{SOURCE_DB}"
@@ -45,9 +177,16 @@ def main():
         if not os.path.exists(path):
             print(f"  (skip) missing {csv_name}")
             continue
-        print(f"  loading {csv_name} -> {SCHEMA}.{table} ...")
-        df = pd.read_csv(path)
-        df.to_sql(table, engine, schema=SCHEMA, if_exists="replace",
+
+        print(f"  creating {SCHEMA}.{table} (explicit DDL + PK) ...")
+        with engine.begin() as conn:
+            conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}"))
+            conn.execute(text(f"DROP TABLE IF EXISTS {SCHEMA}.{table} CASCADE"))
+            conn.execute(text(DDL[table].format(s=SCHEMA)))
+
+        print(f"  appending {csv_name} -> {SCHEMA}.{table} ...")
+        df = _coerce(pd.read_csv(path), table)
+        df.to_sql(table, engine, schema=SCHEMA, if_exists="append",
                   index=False, chunksize=10000, method="multi")
         print(f"    {len(df):,} rows")
         loaded += 1

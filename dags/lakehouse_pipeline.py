@@ -1,7 +1,11 @@
 """Mini Lakehouse end-to-end batch pipeline.
 
-Source(Postgres) -> Bronze -> Silver -> Gold -> Platinum, with a Great
-Expectations-style DQ gate after each layer and a pytest stage at the end.
+Postgres(olist_source) -> Bronze -> Silver -> Gold -> Platinum, with a
+self-written (GE-style) DQ gate after each layer and a pytest stage at the end.
+
+Seeding the Postgres source is a separate one-off DAG (`seed_source_postgres`);
+this analytics pipeline assumes the source already exists and starts at the
+Bronze ingest.
 
 Each Spark job is submitted to the standalone cluster (SPARK_MASTER_URL set in
 the environment); the Spark driver runs inside the airflow-scheduler container."""
@@ -37,16 +41,8 @@ with DAG(
     tags=["lakehouse", "olist", "iceberg"],
 ) as dag:
 
-    # [extension #3] load CSV into Postgres source (pure-python, no Spark)
-    load_source = BashOperator(
-        task_id="load_source_to_postgres",
-        bash_command=f"python {PIPELINE}/bronze/load_source.py",
-        env={"DATASET_DIR": "/opt/dataset",
-             "POSTGRES_USER": "airflow", "POSTGRES_PASSWORD": "airflow",
-             "SOURCE_DB": "olist_source"},
-        append_env=True,
-    )
-
+    # source seeding lives in the one-off `seed_source_postgres` DAG; the
+    # analytics pipeline starts straight at the Bronze ingest.
     ingest_bronze = spark_task("ingest_raw_to_bronze", "bronze/ingest.py")
     validate_bronze = spark_task("validate_bronze", "bronze/validate.py")
     transform_silver = spark_task("transform_bronze_to_silver", "silver/transform.py")
@@ -64,6 +60,6 @@ with DAG(
 
     notify_done = EmptyOperator(task_id="notify_done")
 
-    (load_source >> ingest_bronze >> validate_bronze >> transform_silver
+    (ingest_bronze >> validate_bronze >> transform_silver
         >> validate_silver >> build_dims >> build_facts >> validate_gold
         >> build_platinum >> run_tests >> notify_done)

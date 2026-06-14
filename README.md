@@ -10,7 +10,7 @@ lưu trữ Iceberg trên MinIO, truy vấn bằng Trino.
 ```
 CSV ─▶ Postgres(olist_source) ─▶ Bronze ─▶ Silver ─▶ Gold ─▶ Platinum ─▶ Superset
                                   └────── Iceberg trên MinIO ──────┘        (qua Trino)
-        Airflow điều phối · Great Expectations (DQ gate) · pytest (tests/)
+        Airflow điều phối · DQ framework tự viết (kiểu GE, DQ gate) · pytest (tests/)
 ```
 
 ## Tech stack
@@ -43,15 +43,23 @@ python scripts/upload_raw_data.py
 | Spark Master | http://localhost:8080 | — |
 
 ## Chạy pipeline
-Mở Airflow (http://localhost:8085) → bật/trigger DAG **`lakehouse_pipeline`**.
-Thứ tự task:
+Có 2 DAG, tách phần seed nguồn ra khỏi pipeline phân tích:
+
+1. **`seed_source_postgres`** — chạy **1 lần** (manual trigger) để nạp 9 CSV vào
+   Postgres `olist_source` (giả lập OLTP, tạo bảng bằng DDL tường minh + PRIMARY KEY).
+2. **`lakehouse_pipeline`** — pipeline phân tích, bắt đầu thẳng từ Bronze ingest:
 
 ```
-load_source_to_postgres → ingest_raw_to_bronze → validate_bronze
+ingest_raw_to_bronze → validate_bronze
 → transform_bronze_to_silver → validate_silver
 → build_gold_dims → build_gold_facts → validate_gold
 → build_platinum → run_etl_tests → notify_done
 ```
+
+> Bronze ingest bảng `orders` theo kiểu **incremental** (watermark trên
+> `order_purchase_timestamp`, append, partition theo `months(business date)`),
+> lưu watermark ở `meta.ingest_watermark`. Mỗi lần chạy lại chỉ nạp dòng mới và
+> Iceberg giữ nguyên lịch sử snapshot (xem demo time-travel ở cuối job).
 
 ## Kiểm tra kết quả (qua Trino)
 ```sql
@@ -82,8 +90,10 @@ SELECT * FROM iceberg.platinum.mart_monthly_revenue ORDER BY year, month;
 - **Iceberg warehouse**: tất cả bảng nằm dưới bucket `warehouse` (`s3a://warehouse/<db>.db/`),
   Trino đọc qua catalog `iceberg` + Hive Metastore. Các bucket `bronze/silver/gold/platinum`
   vẫn được tạo cho dữ liệu raw/metadata và minh hoạ kiến trúc phân tầng.
-- **Idempotent**: Bronze/Silver/Gold/Platinum dùng `createOrReplace` (overwrite) → chạy lại
-  pipeline cho kết quả giống nhau.
+- **Idempotent**: hầu hết Bronze/Silver/Gold/Platinum dùng `createOrReplace` (overwrite) →
+  chạy lại pipeline cho kết quả giống nhau. Riêng `bronze.orders` là **incremental append**
+  theo watermark (`meta.ingest_watermark`) nên chạy lại không tạo bản ghi trùng, đồng thời
+  vẫn idempotent (không có dòng mới ⇒ không append).
 - **DQ gate**: mỗi job `validate_*` fail sẽ dừng pipeline; kết quả ghi vào `meta.dq_results`.
 - **Spark**: jobs submit tới standalone cluster (`spark://spark-master:7077`); driver chạy
   trong container `airflow-scheduler` (client mode, jar parity giữa 2 image).
