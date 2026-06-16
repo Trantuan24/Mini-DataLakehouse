@@ -5,6 +5,14 @@ Unlike a quick `to_sql(if_exists="replace")` dump, this creates each table with
 an explicit DDL + PRIMARY KEY (proper OLTP shape) and then *appends* the rows.
 Tables are dropped/recreated first so the seed job stays idempotent.
 
+Two modes (env SEED_MODE):
+  full       (default) -> seed ALL 9 tables (the Step-0 baseline; pipeline can
+                          run straight after this).
+  dims_only  -> seed only the 5 reference/dimension tables; the 4 fact-like
+                tables (orders/order_items/order_payments/order_reviews) are
+                CREATED EMPTY and owned by simulate_source.py, which replays
+                them month by month (Phase 1 incremental/time-travel demo).
+
 Run inside a container that has pandas + sqlalchemy + psycopg2 (the airflow image).
 This job does NOT need Spark."""
 import os
@@ -19,6 +27,11 @@ PG_USER = os.environ.get("POSTGRES_USER", "airflow")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "airflow")
 SOURCE_DB = os.environ.get("SOURCE_DB", "olist_source")
 SCHEMA = "olist_source"
+SEED_MODE = os.environ.get("SEED_MODE", "full")  # full | dims_only
+
+# fact-like tables replayed over time by simulate_source.py (left empty in
+# dims_only mode); the rest are reference/dimension tables seeded once.
+FACT_TABLES = {"orders", "order_items", "order_payments", "order_reviews"}
 
 CSV_TO_TABLE = {
     "olist_orders_dataset.csv": "orders",
@@ -33,9 +46,10 @@ CSV_TO_TABLE = {
 }
 
 # Explicit DDL with PRIMARY KEY for every table (OLTP-like source schema).
-# `geolocation` and `order_reviews` carry natural-key duplicates in the raw
-# Olist dump, so they get a surrogate serial PK to preserve every row while
-# still having a primary key (no table left without one).
+# `geolocation` keeps a surrogate serial PK (its natural key, the zip prefix,
+# repeats many times). `order_reviews` uses the composite (review_id, order_id)
+# which IS unique in the raw dump (review_id alone is not) -> preserves every
+# row AND gives the replay simulator a real ON CONFLICT target.
 DDL = {
     "orders": """
         CREATE TABLE {s}.orders (
@@ -97,14 +111,14 @@ DDL = {
         )""",
     "order_reviews": """
         CREATE TABLE {s}.order_reviews (
-            review_pk bigserial PRIMARY KEY,
             review_id varchar(32) NOT NULL,
             order_id varchar(32) NOT NULL,
             review_score integer,
             review_comment_title varchar(128),
             review_comment_message text,
             review_creation_date timestamp,
-            review_answer_timestamp timestamp
+            review_answer_timestamp timestamp,
+            PRIMARY KEY (review_id, order_id)
         )""",
     "geolocation": """
         CREATE TABLE {s}.geolocation (
@@ -171,6 +185,7 @@ def main():
               f"Place the Olist dataset there first.", file=sys.stderr)
         sys.exit(1)
 
+    print(f"[load_source] SEED_MODE={SEED_MODE}")
     loaded = 0
     for csv_name, table in CSV_TO_TABLE.items():
         path = os.path.join(DATASET_DIR, csv_name)
@@ -178,11 +193,17 @@ def main():
             print(f"  (skip) missing {csv_name}")
             continue
 
+        # always (re)create the schema with explicit DDL + PK
         print(f"  creating {SCHEMA}.{table} (explicit DDL + PK) ...")
         with engine.begin() as conn:
             conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}"))
             conn.execute(text(f"DROP TABLE IF EXISTS {SCHEMA}.{table} CASCADE"))
             conn.execute(text(DDL[table].format(s=SCHEMA)))
+
+        # in dims_only mode leave the fact-like tables EMPTY for simulate_source
+        if SEED_MODE == "dims_only" and table in FACT_TABLES:
+            print(f"    (dims_only) left empty -> owned by simulate_source")
+            continue
 
         print(f"  appending {csv_name} -> {SCHEMA}.{table} ...")
         df = _coerce(pd.read_csv(path), table)
@@ -191,7 +212,7 @@ def main():
         print(f"    {len(df):,} rows")
         loaded += 1
 
-    print(f"Done: loaded {loaded} tables into {SOURCE_DB}.{SCHEMA}")
+    print(f"Done ({SEED_MODE}): populated {loaded} tables in {SOURCE_DB}.{SCHEMA}")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,13 @@
 """[Extension #3] One-off seed DAG.
 
 Loads the raw Olist CSVs into the Postgres `olist_source` schema to simulate an
-OLTP source system. Run this ONCE (manual trigger) to populate the source DB;
-the analytics DAG `lakehouse_pipeline` then ingests from it incrementally and
-never needs to re-seed."""
+OLTP source system. Run this ONCE (manual trigger) to populate the source DB.
+
+Two modes via trigger conf {"mode": ...} (default "full"):
+  full       -> seed all 9 tables; lakehouse_pipeline can run straight after
+                (this is the Step-0 baseline).
+  dims_only  -> seed only the 5 dimensions and leave the 4 fact tables empty
+                for `simulate_source` to replay month by month (Phase 1)."""
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -32,6 +36,8 @@ with DAG(
         bash_command=f"python {PIPELINE}/bronze/load_source.py",
         env={"DATASET_DIR": "/opt/dataset",
              "POSTGRES_USER": "airflow", "POSTGRES_PASSWORD": "airflow",
-             "SOURCE_DB": "olist_source"},
+             "SOURCE_DB": "olist_source",
+             # "full" (default) or "dims_only" via trigger conf {"mode": ...}
+             "SEED_MODE": "{{ dag_run.conf.get('mode', 'full') }}"},
         append_env=True,
     )
