@@ -15,7 +15,7 @@ services:
   # ============================================================
   postgres:
     image: postgres:14
-    container_name: postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -35,6 +35,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     networks:
       - lakehouse-net
 
@@ -43,7 +44,7 @@ services:
   # ============================================================
   minio:
     image: minio/minio:RELEASE.2024-06-13T22-53-53Z
-    container_name: minio
+    restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -58,13 +59,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     networks:
       - lakehouse-net
 
   # auto-create buckets then exit
   minio-init:
     image: minio/mc:RELEASE.2024-06-12T14-34-03Z
-    container_name: minio-init
+    restart: "no"
     depends_on:
       minio:
         condition: service_healthy
@@ -84,10 +86,12 @@ services:
   hive-metastore:
     build:
       context: ./docker/hive
-    container_name: hive-metastore
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       SERVICE_NAME: metastore
       DB_DRIVER: postgres
@@ -103,6 +107,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+      start_period: 40s
     networks:
       - lakehouse-net
 
@@ -112,7 +117,12 @@ services:
   spark-master:
     build:
       context: ./docker/spark
-    container_name: spark-master
+    restart: unless-stopped
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      hive-metastore:
+        condition: service_healthy
     environment:
       <<: *spark-env
       SPARK_MODE: master
@@ -124,18 +134,27 @@ services:
     volumes:
       - ./pipeline:/opt/pipeline
       - ./dataset:/opt/dataset
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/ -o /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     networks:
       - lakehouse-net
 
   spark-worker:
     build:
       context: ./docker/spark
-    container_name: spark-worker
+    restart: unless-stopped
     depends_on:
-      - spark-master
+      spark-master:
+        condition: service_healthy
     environment:
       <<: *spark-env
       SPARK_MODE: worker
+      SPARK_WORKER_MEMORY: 3G
+      SPARK_WORKER_CORES: 3
     command: >
       /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     ports:
@@ -143,6 +162,12 @@ services:
     volumes:
       - ./pipeline:/opt/pipeline
       - ./dataset:/opt/dataset
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/ -o /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     networks:
       - lakehouse-net
 
@@ -151,9 +176,10 @@ services:
   # ============================================================
   trino:
     image: trinodb/trino:440
-    container_name: trino
+    restart: unless-stopped
     depends_on:
-      - hive-metastore
+      hive-metastore:
+        condition: service_healthy
     ports:
       - "8090:8080"
     volumes:
@@ -163,16 +189,19 @@ services:
       interval: 15s
       timeout: 10s
       retries: 10
+      start_period: 20s
     networks:
       - lakehouse-net
 
   # ============================================================
-  # 6. AIRFLOW - orchestration (webserver + scheduler)
+  # 6. AIRFLOW - orchestration (init + webserver + scheduler)
   # ============================================================
-  airflow-webserver:
+  # one-shot: run DB migration + admin user creation exactly once so the
+  # webserver and scheduler never race each other on `airflow db migrate`.
+  airflow-init:
     build:
       context: ./docker/airflow
-    container_name: airflow-webserver
+    restart: "no"
     depends_on:
       postgres:
         condition: service_healthy
@@ -193,27 +222,62 @@ services:
       - ./dataset:/opt/dataset
       - ./tests:/opt/tests
       - airflow-logs:/opt/airflow/logs
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME}" \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD}" \
+          --firstname admin --lastname admin --role Admin \
+          --email admin@example.com || true
+    networks:
+      - lakehouse-net
+
+  airflow-webserver:
+    build:
+      context: ./docker/airflow
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-common-env
+    volumes: *airflow-volumes
     ports:
       - "8085:8080"
-    command: >
-      bash -c "airflow db migrate &&
-               airflow users create --username ${_AIRFLOW_WWW_USER_USERNAME} --password ${_AIRFLOW_WWW_USER_PASSWORD} --firstname admin --lastname admin --role Admin --email admin@example.com || true &&
-               airflow webserver"
+    command: airflow webserver
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     networks:
       - lakehouse-net
 
   airflow-scheduler:
     build:
       context: ./docker/airflow
-    container_name: airflow-scheduler
+    restart: unless-stopped
     depends_on:
-      airflow-webserver:
-        condition: service_started
-    environment:
-      <<: *airflow-common-env
+      airflow-init:
+        condition: service_completed_successfully
+      hive-metastore:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment: *airflow-common-env
     volumes: *airflow-volumes
-    command: >
-      bash -c "airflow db migrate && airflow scheduler"
+    command: airflow scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     networks:
       - lakehouse-net
 
@@ -223,12 +287,12 @@ services:
   superset:
     build:
       context: ./docker/superset
-    container_name: superset
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       trino:
-        condition: service_started
+        condition: service_healthy
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
       SUPERSET_ADMIN: ${SUPERSET_ADMIN}

@@ -59,7 +59,11 @@ def silver_customers(spark):
 
 def silver_products(spark):
     products = _trim_strings(spark.table("bronze.products"))
-    trans = _trim_strings(spark.table("bronze.category_translation"))
+    # keep only the join key + translation; dropping category_translation's own
+    # _ingested_at/_source_file metadata avoids a COLUMN_ALREADY_EXISTS clash
+    # with the same columns already on `products`.
+    trans = (_trim_strings(spark.table("bronze.category_translation"))
+             .select("product_category_name", "product_category_name_english"))
     df = products.join(trans, on="product_category_name", how="left")
     df = df.withColumn(
         "product_category_name_english",

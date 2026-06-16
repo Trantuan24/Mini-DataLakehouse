@@ -35,7 +35,8 @@ with DAG(
     dag_id="lakehouse_pipeline",
     description="Olist Mini Lakehouse: Bronze->Silver->Gold->Platinum",
     default_args=default_args,
-    schedule_interval="@once",
+    schedule_interval=None,  # manual trigger only -> deterministic; never fires
+                             # before the source DB has been seeded
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=["lakehouse", "olist", "iceberg"],
