@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
+from airflow.utils.task_group import TaskGroup
 
 PIPELINE = "/opt/pipeline"
 
@@ -25,9 +26,13 @@ default_args = {
 
 
 def spark_task(task_id, module_path):
+    # RUN_ID = the Airflow dag run_id, shared by every Spark job of one run so
+    # their meta.job_log rows can be correlated. append_env keeps PATH/Spark env.
     return BashOperator(
         task_id=task_id,
         bash_command=f"spark-submit {PIPELINE}/{module_path}",
+        env={"RUN_ID": "{{ run_id }}"},
+        append_env=True,
     )
 
 
@@ -43,24 +48,37 @@ with DAG(
 ) as dag:
 
     # source seeding lives in the one-off `seed_source_postgres` DAG; the
-    # analytics pipeline starts straight at the Bronze ingest.
-    ingest_bronze = spark_task("ingest_raw_to_bronze", "bronze/ingest.py")
-    validate_bronze = spark_task("validate_bronze", "bronze/validate.py")
-    transform_silver = spark_task("transform_bronze_to_silver", "silver/transform.py")
-    validate_silver = spark_task("validate_silver", "silver/validate.py")
-    build_dims = spark_task("build_gold_dims", "gold/build_dimensions.py")
-    build_facts = spark_task("build_gold_facts", "gold/build_facts.py")
-    validate_gold = spark_task("validate_gold", "gold/validate.py")
-    build_platinum = spark_task("build_platinum", "platinum/build_marts.py")
+    # analytics pipeline starts straight at the Bronze ingest. Tasks are grouped
+    # by medallion layer (TaskGroup) so the graph view maps to the architecture.
+    with TaskGroup(group_id="bronze") as bronze:
+        ingest = spark_task("ingest_raw_to_bronze", "bronze/ingest.py")
+        validate = spark_task("validate_bronze", "bronze/validate.py")
+        ingest >> validate
 
-    # [extension #2] pytest ETL checks
+    with TaskGroup(group_id="silver") as silver:
+        transform = spark_task("transform_bronze_to_silver", "silver/transform.py")
+        validate = spark_task("validate_silver", "silver/validate.py")
+        transform >> validate
+
+    with TaskGroup(group_id="gold") as gold:
+        dims = spark_task("build_gold_dims", "gold/build_dimensions.py")
+        facts = spark_task("build_gold_facts", "gold/build_facts.py")
+        validate = spark_task("validate_gold", "gold/validate.py")
+        dims >> facts >> validate
+
+    with TaskGroup(group_id="platinum") as platinum:
+        spark_task("build_platinum", "platinum/build_marts.py")
+
+    # [extension #2] pytest ETL checks. In a replay demo (trigger conf
+    # {"replay": "1"}) the bronze rowcount test for the replayed fact tables is
+    # skipped, since bronze then holds only the months loaded so far.
     run_tests = BashOperator(
         task_id="run_etl_tests",
         bash_command="pytest -q /opt/tests || true",
+        env={"REPLAY_MODE": "{{ dag_run.conf.get('replay', '0') }}"},
+        append_env=True,
     )
 
     notify_done = EmptyOperator(task_id="notify_done")
 
-    (ingest_bronze >> validate_bronze >> transform_silver
-        >> validate_silver >> build_dims >> build_facts >> validate_gold
-        >> build_platinum >> run_tests >> notify_done)
+    bronze >> silver >> gold >> platinum >> run_tests >> notify_done
