@@ -4,6 +4,7 @@ sys.path.insert(0, "/opt/pipeline")
 
 from pyspark.sql import functions as F, Window
 from common.spark_session import get_spark, ensure_databases
+from common.job_log import job_log, sum_counts
 
 
 def _write(df, table):
@@ -79,11 +80,15 @@ def dim_payment_type(spark):
 def main():
     spark = get_spark("gold_build_dimensions")
     ensure_databases(spark)
-    dim_customer(spark)
-    dim_product(spark)
-    dim_seller(spark)
-    dim_date(spark)
-    dim_payment_type(spark)
+    with job_log(spark, "gold", "gold_build_dimensions") as log:
+        dim_customer(spark)
+        dim_product(spark)
+        dim_seller(spark)
+        dim_date(spark)
+        dim_payment_type(spark)
+        log.rows_out = sum_counts(spark, [f"gold.{t}" for t in
+                                  ["dim_customer", "dim_product", "dim_seller",
+                                   "dim_date", "dim_payment_type"]])
     print("\nGold dimensions complete.")
     spark.stop()
 

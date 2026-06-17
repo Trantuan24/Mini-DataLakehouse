@@ -5,6 +5,7 @@ sys.path.insert(0, "/opt/pipeline")
 
 from pyspark.sql import functions as F, Window
 from common.spark_session import get_spark, ensure_databases
+from common.job_log import job_log, sum_counts
 
 # orders in these statuses never produced revenue -> excluded from $ marts
 NON_REVENUE_STATUSES = ["canceled", "unavailable"]
@@ -128,13 +129,19 @@ def mart_customer_retention(spark):
 def main():
     spark = get_spark("platinum_build_marts")
     ensure_databases(spark)
-    mart_monthly_revenue(spark)
-    mart_state_performance(spark)
-    mart_category_ranking(spark)
-    mart_delivery_kpi(spark)
-    mart_review_by_category(spark)
-    mart_payment_distribution(spark)
-    mart_customer_retention(spark)
+    with job_log(spark, "platinum", "platinum_build_marts") as log:
+        mart_monthly_revenue(spark)
+        mart_state_performance(spark)
+        mart_category_ranking(spark)
+        mart_delivery_kpi(spark)
+        mart_review_by_category(spark)
+        mart_payment_distribution(spark)
+        mart_customer_retention(spark)
+        log.rows_out = sum_counts(spark, [f"platinum.{t}" for t in
+                                  ["mart_monthly_revenue", "mart_state_performance",
+                                   "mart_category_ranking", "mart_delivery_kpi",
+                                   "mart_review_by_category", "mart_payment_distribution",
+                                   "mart_customer_retention"]])
     print("\nPlatinum marts complete.")
     spark.stop()
 
