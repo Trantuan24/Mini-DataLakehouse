@@ -60,7 +60,8 @@ DDL = {
             order_approved_at timestamp,
             order_delivered_carrier_date timestamp,
             order_delivered_customer_date timestamp,
-            order_estimated_delivery_date timestamp
+            order_estimated_delivery_date timestamp,
+            source_updated_at timestamp
         )""",
     "order_items": """
         CREATE TABLE {s}.order_items (
@@ -140,7 +141,7 @@ DDL = {
 TS_COLS = {
     "orders": ["order_purchase_timestamp", "order_approved_at",
                "order_delivered_carrier_date", "order_delivered_customer_date",
-               "order_estimated_delivery_date"],
+               "order_estimated_delivery_date", "source_updated_at"],
     "order_items": ["shipping_limit_date"],
     "order_reviews": ["review_creation_date", "review_answer_timestamp"],
 }
@@ -206,7 +207,12 @@ def main():
             continue
 
         print(f"  appending {csv_name} -> {SCHEMA}.{table} ...")
-        df = _coerce(pd.read_csv(path), table)
+        df = pd.read_csv(path)
+        if table == "orders":
+            # full / insert-only load has one version per order, so the row's
+            # last-change time is just its creation time.
+            df["source_updated_at"] = df["order_purchase_timestamp"]
+        df = _coerce(df, table)
         df.to_sql(table, engine, schema=SCHEMA, if_exists="append",
                   index=False, chunksize=10000, method="multi")
         print(f"    {len(df):,} rows")

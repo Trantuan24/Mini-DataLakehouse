@@ -4,6 +4,7 @@ sys.path.insert(0, "/opt/pipeline")
 
 from pyspark.sql import functions as F
 from common.spark_session import get_spark, ensure_databases
+from common.job_log import job_log, sum_counts
 
 
 def _write(df, table):
@@ -40,7 +41,28 @@ def fact_orders(spark):
         F.coalesce("freight_total", F.lit(0.0)).alias("freight_total"),
         "order_duration_days", "delivery_days", "is_late_delivery",
     )
-    _write(df, "fact_orders")
+    _upsert_orders(spark, df)
+
+
+def _upsert_orders(spark, df):
+    """Idempotent upsert on order_id. First run creates the table; afterwards we
+    MERGE so a redelivered/changed order (lifecycle replay) updates IN PLACE
+    instead of being duplicated. MERGE has no delete-by-source clause, which is
+    fine for an append-only replay where the source set only grows."""
+    table = "gold.fact_orders"
+    if not spark.catalog.tableExists(table):
+        (df.writeTo(table).using("iceberg")
+           .tableProperty("format-version", "2").createOrReplace())
+        print(f"  created {table}: {df.count():,} rows")
+        return
+    df.createOrReplaceTempView("_fact_orders_src")
+    spark.sql(f"""
+        MERGE INTO {table} t
+        USING _fact_orders_src s ON t.order_id = s.order_id
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
+    """)
+    print(f"  merged {table}: now {spark.table(table).count():,} rows")
 
 
 def fact_order_items(spark):
@@ -79,10 +101,14 @@ def fact_payments(spark):
 def main():
     spark = get_spark("gold_build_facts")
     ensure_databases(spark)
-    fact_orders(spark)
-    fact_order_items(spark)
-    fact_reviews(spark)
-    fact_payments(spark)
+    with job_log(spark, "gold", "gold_build_facts") as log:
+        fact_orders(spark)
+        fact_order_items(spark)
+        fact_reviews(spark)
+        fact_payments(spark)
+        log.rows_out = sum_counts(spark, [f"gold.{t}" for t in
+                                  ["fact_orders", "fact_order_items",
+                                   "fact_reviews", "fact_payments"]])
     print("\nGold facts complete.")
     spark.stop()
 

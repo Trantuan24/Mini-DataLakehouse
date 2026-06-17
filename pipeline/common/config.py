@@ -21,8 +21,16 @@ BRONZE_PARTITIONED = {"order_items", "order_payments", "order_reviews"}
 # tables ingested incrementally (append + watermark) instead of full overwrite
 INCREMENTAL_TABLES = {"orders"}
 
-# business event-time column used as the high-watermark per incremental table
-WATERMARK_COLUMN = {"orders": "order_purchase_timestamp"}
+# high-watermark column = when the SOURCE ROW last changed. For orders this is
+# `source_updated_at` (set to purchase time on insert, delivery time on the
+# delivered-update) so that lifecycle UPDATEs are re-ingested as new versions.
+# In insert-only / full mode source_updated_at == order_purchase_timestamp, so
+# the watermark behaves exactly like before (backward compatible).
+WATERMARK_COLUMN = {"orders": "source_updated_at"}
+
+# partition column = business event-time (purchase month), kept separate from the
+# watermark so versions of one order stay in their purchase-month partition.
+PARTITION_COLUMN = {"orders": "order_purchase_timestamp"}
 
 # Iceberg meta table holding the high-watermark per source table
 WATERMARK_TABLE = "meta.ingest_watermark"

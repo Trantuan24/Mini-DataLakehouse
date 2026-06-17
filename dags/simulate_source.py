@@ -10,7 +10,10 @@ and re-running the pipeline must not advance the replay. Demo loop:
     (tick)  trigger lakehouse_pipeline     -> ingest -> ... -> platinum
     repeat the two ticks; bronze.orders grows -> Iceberg snapshots differ.
 
-Optional: trigger with conf {"month": "2017-03"} to jump to a specific month."""
+Trigger conf options:
+  {"month": "2017-03"}  -> jump to a specific month (else: earliest / last + 1)
+  {"lifecycle": "1"}    -> Phase 2 CDC lifecycle (insert undelivered -> later
+                           UPDATE to delivered). Default "0" = Phase 1 insert-once."""
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -41,6 +44,8 @@ with DAG(
              "POSTGRES_USER": "airflow", "POSTGRES_PASSWORD": "airflow",
              "SOURCE_DB": "olist_source",
              # empty unless the trigger passes conf {"month": "YYYY-MM"}
-             "SIM_MONTH": "{{ dag_run.conf.get('month', '') }}"},
+             "SIM_MONTH": "{{ dag_run.conf.get('month', '') }}",
+             # "1" via conf {"lifecycle": "1"} for Phase 2 CDC lifecycle replay
+             "LIFECYCLE_MODE": "{{ dag_run.conf.get('lifecycle', '0') }}"},
         append_env=True,
     )

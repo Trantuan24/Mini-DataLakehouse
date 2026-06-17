@@ -2,9 +2,10 @@
 import sys
 sys.path.insert(0, "/opt/pipeline")
 
-from pyspark.sql import functions as F
+from pyspark.sql import functions as F, Window
 from pyspark.sql.types import DoubleType, IntegerType, TimestampType
 from common.spark_session import get_spark, ensure_databases
+from common.job_log import job_log, sum_counts
 
 
 def _trim_strings(df):
@@ -28,15 +29,28 @@ def silver_orders(spark):
     df = _trim_strings(spark.table("bronze.orders"))
     ts_cols = ["order_purchase_timestamp", "order_approved_at",
                "order_delivered_carrier_date", "order_delivered_customer_date",
-               "order_estimated_delivery_date"]
+               "order_estimated_delivery_date", "source_updated_at"]
     for c in ts_cols:
-        df = df.withColumn(c, F.col(c).cast(TimestampType()))
+        if c in df.columns:
+            df = df.withColumn(c, F.col(c).cast(TimestampType()))
     df = df.filter(F.col("order_id").isNotNull())
+
+    # Bronze is append-only and (under lifecycle replay) holds multiple versions
+    # of the same order_id. Keep the LATEST version per order_id: newest
+    # source_updated_at wins, _ingested_at as a deterministic tiebreak. For
+    # insert-only / full data (one version per order) this is a no-op.
+    order_key = ["source_updated_at"]
+    if "_ingested_at" in df.columns:
+        order_key.append("_ingested_at")
+    w = Window.partitionBy("order_id").orderBy(
+        *[F.col(c).desc_nulls_last() for c in order_key])
+    df = (df.withColumn("_rn", F.row_number().over(w))
+            .filter(F.col("_rn") == 1).drop("_rn"))
+
     df = df.withColumn(
         "order_duration_days",
         F.datediff(F.col("order_delivered_customer_date"), F.col("order_purchase_timestamp")),
     )
-    df = df.dropDuplicates(["order_id"])
     _write(df, "orders")
 
 
@@ -113,17 +127,23 @@ def silver_geolocation(spark):
     _write(df, "geolocation")
 
 
+SILVER_TABLES = ["orders", "order_items", "customers", "products", "sellers",
+                 "order_payments", "order_reviews", "geolocation"]
+
+
 def main():
     spark = get_spark("silver_transform")
     ensure_databases(spark)
-    silver_orders(spark)
-    silver_order_items(spark)
-    silver_customers(spark)
-    silver_products(spark)
-    silver_sellers(spark)
-    silver_order_payments(spark)
-    silver_order_reviews(spark)
-    silver_geolocation(spark)
+    with job_log(spark, "silver", "silver_transform") as log:
+        silver_orders(spark)
+        silver_order_items(spark)
+        silver_customers(spark)
+        silver_products(spark)
+        silver_sellers(spark)
+        silver_order_payments(spark)
+        silver_order_reviews(spark)
+        silver_geolocation(spark)
+        log.rows_out = sum_counts(spark, [f"silver.{t}" for t in SILVER_TABLES])
     print("\nSilver transform complete.")
     spark.stop()
 

@@ -21,8 +21,10 @@ sys.path.insert(0, "/opt/pipeline")
 from pyspark.sql import functions as F
 from pyspark.sql.functions import current_timestamp, lit, days, months, col, to_timestamp
 from common.spark_session import get_spark, ensure_databases
+from common.job_log import job_log, sum_counts
 from common.config import (CSV_TO_TABLE, BRONZE_PARTITIONED, DATASET_DIR,
-                           INCREMENTAL_TABLES, WATERMARK_COLUMN, WATERMARK_TABLE,
+                           INCREMENTAL_TABLES, WATERMARK_COLUMN, PARTITION_COLUMN,
+                           WATERMARK_TABLE,
                            pg_jdbc_url, PG_SOURCE_SCHEMA, PG_PROPERTIES)
 
 INGEST_SOURCE = os.environ.get("INGEST_SOURCE", "postgres")
@@ -74,29 +76,39 @@ def _update_watermark(spark, table, new_value):
 
 
 def ingest_incremental(spark, table, df):
-    """Append only rows whose business event-time is newer than the watermark,
-    partitioning by the business month. Idempotent: a re-run with no new source
-    rows appends nothing and leaves the watermark untouched."""
+    """Append only rows whose WATERMARK column is newer than the stored
+    high-watermark, partitioning by the BUSINESS month (a separate column).
+
+    The two columns differ once lifecycle replay is on: the watermark tracks
+    when the source row last changed (source_updated_at) so delivered-UPDATEs
+    are re-ingested as new versions, while the partition stays the purchase
+    month so every version of an order lands in the same partition. In
+    insert-only / full mode the two columns hold the same value, so behaviour
+    is unchanged. Idempotent: a re-run with no newer rows appends nothing."""
     wm_col = WATERMARK_COLUMN[table]
-    # business event-time, used both for filtering and as the partition key
-    df = df.withColumn("_business_ts", to_timestamp(col(wm_col)))
+    part_col = PARTITION_COLUMN.get(table, wm_col)
+    # safety for sources that lack the watermark column (e.g. raw CSV mode)
+    if wm_col not in df.columns:
+        wm_col = part_col
 
     watermark = _read_watermark(spark, table)
-    print(f"  watermark[{table}] = {watermark}")
-    new_rows = df.filter(col("_business_ts") > F.lit(watermark).cast("timestamp"))
+    print(f"  watermark[{table}] on {wm_col} = {watermark}")
+    wm_ts = to_timestamp(col(wm_col))
+    new_rows = (df.filter(wm_ts > F.lit(watermark).cast("timestamp"))
+                  .withColumn("_part_ts", to_timestamp(col(part_col))))
     cnt = new_rows.count()
     print(f"  {cnt:,} new row(s) after watermark")
 
     if not spark.catalog.tableExists(f"bronze.{table}"):
         (new_rows.writeTo(f"bronze.{table}").using("iceberg")
             .tableProperty("format-version", "2")
-            .partitionedBy(months(col("_business_ts")))
+            .partitionedBy(months(col("_part_ts")))
             .createOrReplace())
     elif cnt > 0:
         new_rows.writeTo(f"bronze.{table}").append()
 
     if cnt > 0:
-        new_max = new_rows.agg(F.max("_business_ts")).collect()[0][0]
+        new_max = new_rows.agg(F.max(to_timestamp(col(wm_col)))).collect()[0][0]
         _update_watermark(spark, table, new_max)
         print(f"  watermark advanced to {new_max}")
 
@@ -129,25 +141,28 @@ def main():
     spark = get_spark("bronze_ingest")
     ensure_databases(spark)
 
-    for csv_name, table in CSV_TO_TABLE.items():
-        print(f"\n[bronze] {table}  (from {INGEST_SOURCE})")
-        df = read_source(spark, table, csv_name)
-        df = (df.withColumn("_ingested_at", current_timestamp())
-                .withColumn("_source_file", lit(csv_name)))
+    with job_log(spark, "bronze", "bronze_ingest") as log:
+        for csv_name, table in CSV_TO_TABLE.items():
+            print(f"\n[bronze] {table}  (from {INGEST_SOURCE})")
+            df = read_source(spark, table, csv_name)
+            df = (df.withColumn("_ingested_at", current_timestamp())
+                    .withColumn("_source_file", lit(csv_name)))
 
-        if table in INCREMENTAL_TABLES:
-            ingest_incremental(spark, table, df)
-        else:
-            writer = df.writeTo(f"bronze.{table}").using("iceberg") \
-                       .tableProperty("format-version", "2")
-            if table in BRONZE_PARTITIONED:
-                writer = writer.partitionedBy(days(col("_ingested_at")))
-            writer.createOrReplace()
-            print(f"  wrote bronze.{table}: {df.count():,} rows")
+            if table in INCREMENTAL_TABLES:
+                ingest_incremental(spark, table, df)
+            else:
+                writer = df.writeTo(f"bronze.{table}").using("iceberg") \
+                           .tableProperty("format-version", "2")
+                if table in BRONZE_PARTITIONED:
+                    writer = writer.partitionedBy(days(col("_ingested_at")))
+                writer.createOrReplace()
+                print(f"  wrote bronze.{table}: {df.count():,} rows")
 
-    # showcase Iceberg time-travel on the incremental table
-    for table in INCREMENTAL_TABLES:
-        demo_time_travel(spark, table)
+        # showcase Iceberg time-travel on the incremental table
+        for table in INCREMENTAL_TABLES:
+            demo_time_travel(spark, table)
+
+        log.rows_out = sum_counts(spark, [f"bronze.{t}" for t in CSV_TO_TABLE.values()])
 
     print("\nBronze ingest complete.")
     spark.stop()
