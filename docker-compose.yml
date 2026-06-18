@@ -180,6 +180,12 @@ services:
     depends_on:
       hive-metastore:
         condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      HIVE_METASTORE_URI: ${HIVE_METASTORE_URI}
     ports:
       - "8090:8080"
     volumes:

@@ -49,6 +49,11 @@ def expect_column_between(df, column, low, high, *, table, layer):
     return _result(table, layer, f"{column}_between_{low}_{high}", bad == 0, bad, 0)
 
 
+def expect_column_values_in_set(df, column, allowed, *, table, layer):
+    bad = df.filter(df[column].isNotNull() & ~df[column].isin(*list(allowed))).count()
+    return _result(table, layer, f"{column}_accepted_values", bad == 0, bad, 0)
+
+
 def expect_column_positive(df, column, *, table, layer):
     bad = df.filter(df[column] <= 0).count()
     return _result(table, layer, f"{column}_positive", bad == 0, bad, 0)

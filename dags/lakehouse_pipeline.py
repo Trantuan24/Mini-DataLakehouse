@@ -74,7 +74,7 @@ with DAG(
     # skipped, since bronze then holds only the months loaded so far.
     run_tests = BashOperator(
         task_id="run_etl_tests",
-        bash_command="pytest -q /opt/tests || true",
+        bash_command="pytest -q -o cache_dir=/tmp/pytest_cache /opt/tests",
         env={"REPLAY_MODE": "{{ dag_run.conf.get('replay', '0') }}"},
         append_env=True,
     )

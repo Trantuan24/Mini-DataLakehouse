@@ -14,10 +14,21 @@ def main():
     orders = spark.table("silver.orders")
     results.append(dq.expect_column_not_null(orders, "order_id", table="silver.orders", layer="silver"))
     results.append(dq.expect_unique(orders, ["order_id"], table="silver.orders", layer="silver"))
+    results.append(dq.expect_column_values_in_set(
+        orders, "order_status",
+        {"created", "approved", "invoiced", "processing", "shipped", "delivered",
+         "canceled", "unavailable"},
+        table="silver.orders", layer="silver"))
 
     items = spark.table("silver.order_items")
     results.append(dq.expect_unique(items, ["order_id", "order_item_id"], table="silver.order_items", layer="silver"))
     results.append(dq.expect_column_positive(items, "price", table="silver.order_items", layer="silver"))
+
+    payments = spark.table("silver.order_payments")
+    results.append(dq.expect_column_values_in_set(
+        payments, "payment_type",
+        {"credit_card", "boleto", "voucher", "debit_card", "not_defined"},
+        table="silver.order_payments", layer="silver"))
 
     reviews = spark.table("silver.order_reviews")
     results.append(dq.expect_column_between(reviews, "review_score", 1, 5, table="silver.order_reviews", layer="silver"))

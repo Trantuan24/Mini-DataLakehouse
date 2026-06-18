@@ -1,5 +1,7 @@
 """Central configuration: source mappings, table lists, paths."""
 
+import os
+
 # CSV filename  ->  base table name (Build spec naming)
 CSV_TO_TABLE = {
     "olist_orders_dataset.csv": "orders",
@@ -54,13 +56,14 @@ PRIMARY_KEYS = {
     "category_translation": ["product_category_name"],
 }
 
-# Postgres source (extension #3)
-PG_HOST = "postgres"
-PG_PORT = 5432
-PG_SOURCE_DB = "olist_source"
-PG_SOURCE_SCHEMA = "olist_source"
-PG_USER = "airflow"
-PG_PASSWORD = "airflow"
+# Postgres source (extension #3). Defaults keep local Docker Compose easy to
+# run, while env overrides avoid baking credentials into pipeline code.
+PG_HOST = os.environ.get("PG_HOST", "postgres")
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
+PG_SOURCE_DB = os.environ.get("SOURCE_DB", os.environ.get("PG_SOURCE_DB", "olist_source"))
+PG_SOURCE_SCHEMA = os.environ.get("PG_SOURCE_SCHEMA", "olist_source")
+PG_USER = os.environ.get("POSTGRES_USER", os.environ.get("PG_USER", "airflow"))
+PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", os.environ.get("PG_PASSWORD", "airflow"))
 
 
 def pg_jdbc_url(db: str = PG_SOURCE_DB) -> str:

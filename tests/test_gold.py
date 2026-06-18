@@ -20,6 +20,11 @@ def test_fact_orders_matches_silver(spark):
     assert fo == so
 
 
+def test_fact_orders_pk_unique(spark):
+    fo = spark.table("gold.fact_orders")
+    assert fo.count() == fo.select("order_id").distinct().count()
+
+
 def test_dim_customer_pk_not_null(spark):
     dc = spark.table("gold.dim_customer")
     assert dc.filter(dc.customer_id.isNull()).count() == 0

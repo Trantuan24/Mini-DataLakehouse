@@ -21,3 +21,13 @@ def test_silver_review_score_range(spark):
     df = spark.table("silver.order_reviews")
     bad = df.filter((df.review_score < 1) | (df.review_score > 5)).count()
     assert bad == 0
+
+
+def test_silver_order_status_accepted_values(spark):
+    df = spark.table("silver.orders")
+    allowed = [
+        "created", "approved", "invoiced", "processing", "shipped",
+        "delivered", "canceled", "unavailable",
+    ]
+    bad = df.filter(df.order_status.isNotNull() & ~df.order_status.isin(*allowed)).count()
+    assert bad == 0

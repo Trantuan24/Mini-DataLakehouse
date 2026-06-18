@@ -36,6 +36,8 @@ def main():
         table="gold.fact_payments", layer="gold"))
 
     # measures / PKs
+    results.append(dq.expect_column_not_null(fact_orders, "order_id", table="gold.fact_orders", layer="gold"))
+    results.append(dq.expect_unique(fact_orders, ["order_id"], table="gold.fact_orders", layer="gold"))
     results.append(dq.expect_column_not_null(dim_customer, "customer_id", table="gold.dim_customer", layer="gold"))
     results.append(dq.expect_column_not_null(dim_product, "product_id", table="gold.dim_product", layer="gold"))
 
