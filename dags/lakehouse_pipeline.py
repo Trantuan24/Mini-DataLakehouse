@@ -9,6 +9,7 @@ Bronze ingest.
 
 Each Spark job is submitted to the standalone cluster (SPARK_MASTER_URL set in
 the environment); the Spark driver runs inside the airflow-scheduler container."""
+import logging
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -17,11 +18,30 @@ from airflow.utils.task_group import TaskGroup
 
 PIPELINE = "/opt/pipeline"
 
+
+def alert_on_failure(context):
+    """Lightweight failure alert: log the failed task + run_id so a red DAG is
+    easy to triage. Dependency-free on purpose (no SMTP/Slack) -- the real
+    pipeline gate is the DQ/pytest task failing the run; this just annotates it.
+    Swap the log line for an email/Slack call if a channel is configured."""
+    ti = context.get("task_instance")
+    dag = context.get("dag")
+    logging.error(
+        "[ALERT] task FAILED: dag=%s task=%s run_id=%s try=%s log=%s",
+        dag.dag_id if dag else "?",
+        ti.task_id if ti else "?",
+        context.get("run_id"),
+        ti.try_number if ti else "?",
+        ti.log_url if ti else "?",
+    )
+
+
 default_args = {
     "owner": "tranduytuan",
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
     "execution_timeout": timedelta(minutes=30),
+    "on_failure_callback": alert_on_failure,
 }
 
 
