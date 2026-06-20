@@ -1,26 +1,47 @@
-# Iceberg Features Demo — Time-travel, Snapshot History & MERGE INTO
+# Iceberg Features Demo — Snapshot, Time-travel & MERGE INTO
 
-Tài liệu này minh hoạ **vì sao dự án chọn Apache Iceberg** chứ không chỉ lưu Parquet thuần:
-khả năng **versioning (snapshot)**, **time-travel** và **upsert bằng MERGE INTO** (CDC).
+Tài liệu này dùng để demo **vì sao dự án chọn Apache Iceberg** thay vì chỉ lưu
+Parquet thuần: Iceberg có metadata snapshot, đọc lại dữ liệu quá khứ bằng
+time-travel, và hỗ trợ upsert/CDC bằng `MERGE INTO`.
 
-Toàn bộ truy vấn chạy trong **Trino** (catalog `iceberg`). File SQL đầy đủ:
+Các truy vấn chạy bằng **Trino** trên catalog `iceberg`. File SQL đi kèm:
 [`scripts/iceberg_demo.sql`](../scripts/iceberg_demo.sql).
 
-> Cách chạy nhanh:
-> ```bash
-> docker compose exec -T trino trino --catalog iceberg
-> ```
-> rồi dán từng câu lệnh bên dưới. Bảng minh hoạ chính là `bronze.orders`
-> (được `simulate_source` replay theo từng tháng nên sinh nhiều snapshot) và
-> `gold.fact_orders` (dùng MERGE INTO để upsert vòng đời đơn hàng).
+## 0. Cách chạy
 
----
+Mở Trino CLI:
+
+```bash
+docker compose exec -T trino trino --catalog iceberg
+# Sử dụng đúng tại local:
+docker compose exec -T trino trino --server 127.0.0.1:8080 --catalog iceberg
+```
+
+Nếu muốn chạy file SQL mẫu:
+
+```bash
+docker compose cp scripts/iceberg_demo.sql trino:/tmp/iceberg_demo.sql
+docker compose exec -T trino trino --catalog iceberg -f /tmp/iceberg_demo.
+# Sử dụng đúng tại local:
+docker compose cp scripts/iceberg_demo.sql trino:/tmp/iceberg_demo.sql
+docker compose exec -T trino trino --server 127.0.0.1:8080 --catalog iceberg -f /tmp/iceberg_demo.sql
+
+```
+
+Lưu ý: file `scripts/iceberg_demo.sql` chỉ chứa các truy vấn **chạy thẳng được**.
+Riêng phần `FOR VERSION AS OF` phải copy `snapshot_id` từ kết quả mục 1 rồi chạy
+thủ công, vì Trino không cho thay động snapshot id trong cùng một câu SQL đơn giản.
+
+Bảng demo chính:
+
+- `iceberg.bronze.orders`: bảng incremental append, sinh nhiều snapshot khi replay.
+- `iceberg.gold.fact_orders`: bảng fact dùng `MERGE INTO` ở pipeline Gold.
 
 ## 1. Snapshot history — mỗi lần ghi tạo một phiên bản mới
 
-Iceberg ghi **bất biến (immutable)**: mỗi lần ingest/replay/MERGE tạo một *snapshot*
-mới thay vì sửa đè. Bảng metadata `…$snapshots` và `…$history` cho ta xem toàn bộ
-lịch sử commit.
+Iceberg lưu metadata cho từng lần ghi. Với bảng `bronze.orders`, mỗi lần ingest
+hoặc replay thêm tháng mới sẽ tạo snapshot mới. Hai metadata table quan trọng là
+`orders$snapshots` và `orders$history`.
 
 ```sql
 SELECT snapshot_id, parent_id, operation, committed_at
@@ -34,31 +55,58 @@ FROM iceberg.bronze."orders$history"
 ORDER BY made_current_at;
 ```
 
-**Kết quả mong đợi:** nhiều dòng snapshot, `operation` gồm `append` (ingest thêm
-tháng) và có thể `overwrite`; thời điểm `committed_at` tăng dần theo các lần replay.
+Kết quả mong đợi:
 
-📷 **Ảnh cần chụp:** kết quả 2 câu trên trong Trino CLI / Trino Web UI (port 8090).
-Lưu vào: `docs/images/iceberg/01_snapshots.png`
+- Có nhiều dòng snapshot.
+- `committed_at` tăng dần theo các lần chạy pipeline/replay.
+- `operation` thường có `append`, `overwrite`, hoặc các operation liên quan đến rewrite/MERGE.
 
-<!-- ![Snapshot history](images/iceberg/01_snapshots.png) -->
+Ảnh cần chụp: kết quả 2 câu trên trong Trino CLI hoặc Trino Web UI.
 
----
+Lưu vào:
+
+```text
+docs/images/iceberg/01_snapshots.png
+```
+
+![Snapshot history](images/iceberg/01_snapshots.png)
 
 ## 2. Time-travel — đọc lại trạng thái quá khứ
 
-Lấy 2 `snapshot_id` từ mục 1 (một cũ, một mới), thay vào `FOR VERSION AS OF`:
+Đầu tiên lấy snapshot cũ và snapshot mới:
 
 ```sql
--- snapshot CŨ (vd sau tháng đầu replay)
-SELECT count(*) AS rows_at_old_snapshot
-FROM iceberg.bronze.orders FOR VERSION AS OF <SNAP_CU>;
+-- Snapshot cũ: lấy một snapshot đầu tiên
+SELECT snapshot_id, committed_at, operation
+FROM iceberg.bronze."orders$snapshots"
+ORDER BY committed_at
+LIMIT 5;
 
--- snapshot MỚI (sau nhiều tháng) -> số dòng lớn hơn
-SELECT count(*) AS rows_at_new_snapshot
-FROM iceberg.bronze.orders FOR VERSION AS OF <SNAP_MOI>;
+-- Snapshot mới: lấy snapshot gần nhất
+SELECT snapshot_id, committed_at, operation
+FROM iceberg.bronze."orders$snapshots"
+ORDER BY committed_at DESC
+LIMIT 5;
 ```
 
-Cũng có thể time-travel theo **mốc thời gian**:
+Sau đó copy 2 giá trị `snapshot_id` vào 2 câu dưới đây. Ví dụ nếu snapshot id là
+`123456789`, viết trực tiếp số đó, không dùng dấu `< >`.
+
+```sql
+-- Thay 123456789 bằng snapshot_id cũ
+SELECT count(*) AS rows_at_old_snapshot
+FROM iceberg.bronze.orders FOR VERSION AS OF 123456789;
+
+-- Thay 987654321 bằng snapshot_id mới
+SELECT count(*) AS rows_at_new_snapshot
+FROM iceberg.bronze.orders FOR VERSION AS OF 987654321;
+```
+
+Kết quả mong đợi: số dòng ở snapshot mới lớn hơn snapshot cũ nếu bạn đã replay
+nhiều tháng. Đây là bằng chứng rõ nhất cho khả năng audit/debug dữ liệu quá khứ.
+
+Có thể demo time-travel theo mốc thời gian bằng cách lấy một `committed_at` từ
+`orders$snapshots`, rồi thay vào:
 
 ```sql
 SELECT count(*) AS rows_at_timestamp
@@ -66,35 +114,31 @@ FROM iceberg.bronze.orders
 FOR TIMESTAMP AS OF TIMESTAMP '2026-06-18 00:00:00 UTC';
 ```
 
-**Kết quả mong đợi:** số dòng ở snapshot mới > snapshot cũ — chứng minh dữ liệu lớn
-dần qua các lần replay và mọi phiên bản cũ vẫn đọc được (audit / reproducibility).
+Ảnh cần chụp: 2 kết quả `count(*)` khác nhau ở 2 snapshot.
 
-> Đối chiếu Phase 1 đã verify: `bronze.orders` tăng dần qua các snapshot
-> (ví dụ 4 → 328 dòng giữa 2 mốc replay).
+Lưu vào:
 
-📷 **Ảnh cần chụp:** 2 kết quả count khác nhau ở 2 snapshot.
-Lưu vào: `docs/images/iceberg/02_time_travel.png`
+```text
+docs/images/iceberg/02_time_travel.png
+```
 
-<!-- ![Time travel](images/iceberg/02_time_travel.png) -->
+![Time travel](images/iceberg/02_time_travel.png)
 
----
+## 3. MERGE INTO — upsert vòng đời đơn hàng
 
-## 3. MERGE INTO — upsert vòng đời đơn hàng (CDC)
-
-`gold.fact_orders` được xây bằng `MERGE INTO` thay vì ghi đè:
+Trong pipeline, `gold.fact_orders` được build bằng `MERGE INTO` trong Spark:
 
 ```sql
 MERGE INTO gold.fact_orders t
-USING <silver_orders_latest> s
-ON t.order_id = s.order_id
+USING _fact_orders_src s ON t.order_id = s.order_id
 WHEN MATCHED THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *
 ```
 
-Khi một đơn chuyển trạng thái (`shipped` → `delivered`), bản ghi cũ **được cập nhật
-tại chỗ về mặt logic** (Iceberg tạo snapshot mới), **không** sinh dòng trùng `order_id`.
+Ý nghĩa: khi một order đổi trạng thái, ví dụ `shipped` thành `delivered`, Gold
+cập nhật bản ghi theo `order_id` thay vì sinh thêm dòng trùng khóa.
 
-**Kiểm chứng không trùng PK:**
+Kiểm chứng không trùng `order_id`:
 
 ```sql
 SELECT count(*) AS total_rows,
@@ -103,9 +147,13 @@ SELECT count(*) AS total_rows,
 FROM iceberg.gold.fact_orders;
 ```
 
-→ `duplicates = 0`.
+Kết quả mong đợi:
 
-**Phân bố trạng thái sau MERGE** (cho thấy lifecycle UPDATE đã được áp dụng):
+```text
+duplicates = 0
+```
+
+Kiểm tra phân bố trạng thái sau khi lifecycle update được merge vào Gold:
 
 ```sql
 SELECT order_status, count(*) AS cnt
@@ -114,31 +162,62 @@ GROUP BY order_status
 ORDER BY cnt DESC;
 ```
 
-> Đối chiếu Phase 2 đã verify: 444 đơn `shipped` được MERGE lật thành `delivered`,
-> tổng số dòng không đổi (2580), `duplicates = 0`, rerun idempotent.
+Kiểm tra snapshot của bảng Gold sau các lần MERGE:
 
-📷 **Ảnh cần chụp:**
-- `docs/images/iceberg/03a_merge_no_dup.png` — kết quả `duplicates = 0`.
-- `docs/images/iceberg/03b_status_after_merge.png` — phân bố trạng thái.
+```sql
+SELECT snapshot_id, operation, committed_at
+FROM iceberg.gold."fact_orders$snapshots"
+ORDER BY committed_at;
+```
 
-<!-- ![No duplicates after MERGE](images/iceberg/03a_merge_no_dup.png) -->
-<!-- ![Status after MERGE](images/iceberg/03b_status_after_merge.png) -->
+Ảnh cần chụp:
 
----
+```text
+docs/images/iceberg/03a_merge_no_dup.png
+docs/images/iceberg/03b_status_after_merge.png
+```
 
-## 4. Tóm tắt — vì sao Iceberg
+![No duplicates after MERGE](images/iceberg/03a_merge_no_dup.png)
+![Status after MERGE](images/iceberg/03b_status_after_merge.png)
 
-| Tính năng | Câu lệnh minh hoạ | Lợi ích cho Lakehouse |
-|---|---|---|
-| Snapshot/versioning | `…$snapshots`, `…$history` | Audit, lineage, rollback |
-| Time-travel | `FOR VERSION/TIMESTAMP AS OF` | Reproducibility, debug dữ liệu quá khứ |
-| MERGE INTO (upsert) | `WHEN MATCHED/NOT MATCHED` | CDC, idempotent, không trùng PK |
-| Schema/format-version 2 | `tableProperty('format-version','2')` | Row-level delete/update hiệu quả |
+## 4. Data files — xem layout vật lý của bảng
 
----
+Iceberg cũng cho xem metadata file dữ liệu qua table `$files`:
 
-## Phụ lục — thư mục ảnh
+```sql
+SELECT file_path, record_count, file_size_in_bytes
+FROM iceberg.bronze."orders$files"
+ORDER BY record_count DESC
+LIMIT 20;
+```
 
-Đặt screenshot vào `docs/images/iceberg/` theo tên gợi ý ở trên, rồi **bỏ comment**
-(`<!-- ... -->`) ở các dòng `![...]` tương ứng để ảnh hiển thị khi xem trên GitHub
-hoặc khi chèn vào báo cáo.
+Điểm này dùng để giải thích rằng Iceberg không chỉ là dữ liệu, mà còn có metadata
+quản lý file/snapshot để query engine như Trino đọc hiệu quả hơn.
+
+## 5. Tóm tắt để đưa vào báo cáo
+
+| Tính năng        | Câu lệnh minh hoạ                          | Ý nghĩa trong đồ án                  |
+| ---------------- | ------------------------------------------ | ------------------------------------ |
+| Snapshot history | `orders$snapshots`, `orders$history`       | Audit, kiểm tra lịch sử ghi dữ liệu  |
+| Time-travel      | `FOR VERSION AS OF`, `FOR TIMESTAMP AS OF` | Đọc lại dữ liệu tại một phiên bản cũ |
+| MERGE INTO       | `WHEN MATCHED/NOT MATCHED`                 | Upsert CDC, tránh trùng `order_id`   |
+| Metadata files   | `orders$files`                             | Quan sát layout file vật lý của bảng |
+
+Khi bảo vệ, nên demo theo thứ tự:
+
+1. Mở `orders$snapshots` để cho thấy bảng có nhiều phiên bản.
+2. Chạy `FOR VERSION AS OF` với 2 snapshot khác nhau để thấy row count khác nhau.
+3. Chạy query `duplicates = 0` trên `gold.fact_orders` để chứng minh MERGE không làm trùng khóa.
+4. Mở ảnh hoặc Superset/Trino Web UI để hội đồng thấy kết quả trực quan.
+
+## 6. Checklist ảnh cần chụp
+
+Đặt screenshot vào `docs/images/iceberg/`, sau đó bỏ comment các dòng `![...]`
+tương ứng trong tài liệu này.
+
+| File ảnh                     | Nội dung                                       |
+| ---------------------------- | ---------------------------------------------- |
+| `01_snapshots.png`           | Kết quả `orders$snapshots` và `orders$history` |
+| `02_time_travel.png`         | Row count khác nhau giữa 2 snapshot            |
+| `03a_merge_no_dup.png`       | Query `duplicates = 0`                         |
+| `03b_status_after_merge.png` | Phân bố `order_status` sau MERGE               |
