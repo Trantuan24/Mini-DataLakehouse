@@ -30,7 +30,10 @@ def mart_monthly_revenue(spark):
 
 
 def mart_state_performance(spark):
-    fo = spark.table("gold.fact_orders")
+    # exclude canceled/unavailable so revenue here matches mart_monthly_revenue
+    # (same business definition of "revenue" across every dashboard).
+    fo = (spark.table("gold.fact_orders")
+               .filter(~F.col("order_status").isin(NON_REVENUE_STATUSES)))
     dc = spark.table("gold.dim_customer")
     df = (fo.join(dc, "customer_id", "inner")
             .groupBy("state")
