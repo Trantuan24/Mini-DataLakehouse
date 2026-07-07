@@ -74,6 +74,10 @@ python scripts/upload_raw_data.py   # (tùy chọn) upload CSV lên MinIO raw bu
 | Trino | http://localhost:8090 | (no auth) |
 | Superset | http://localhost:8088 | admin / admin |
 | Spark Master | http://localhost:8080 | — |
+| Spark Worker | http://localhost:8081 | — |
+
+> Trên VPS, đặt `SPARK_PUBLIC_DNS=<public-ip-or-domain>` trong `.env` để các
+> link Worker/Executor trong Spark UI không trỏ về IP Docker nội bộ `172.18.x.x`.
 
 ## 🔄 Luồng xử lý (Workflow)
 

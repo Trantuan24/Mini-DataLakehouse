@@ -8,6 +8,7 @@ x-spark-env: &spark-env
   HIVE_METASTORE_URI: ${HIVE_METASTORE_URI}
   ICEBERG_WAREHOUSE: ${ICEBERG_WAREHOUSE}
   SPARK_MASTER_URL: ${SPARK_MASTER_URL}
+  SPARK_PUBLIC_DNS: ${SPARK_PUBLIC_DNS:-localhost}
 
 services:
   # ============================================================
