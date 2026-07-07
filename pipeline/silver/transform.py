@@ -6,6 +6,7 @@ from pyspark.sql import functions as F, Window
 from pyspark.sql.types import DoubleType, IntegerType, TimestampType
 from common.spark_session import get_spark, ensure_databases
 from common.job_log import job_log, sum_counts
+from common.iceberg import create_or_replace_iceberg
 
 
 def _trim_strings(df):
@@ -20,8 +21,7 @@ def _trim_strings(df):
 
 
 def _write(df, table):
-    (df.writeTo(f"silver.{table}").using("iceberg")
-       .tableProperty("format-version", "2").createOrReplace())
+    create_or_replace_iceberg(df, f"silver.{table}")
     print(f"  wrote silver.{table}: {df.count():,} rows")
 
 

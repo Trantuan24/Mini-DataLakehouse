@@ -37,8 +37,17 @@ PARTITION_COLUMN = {"orders": "order_purchase_timestamp"}
 # Iceberg meta table holding the high-watermark per source table
 WATERMARK_TABLE = "meta.ingest_watermark"
 
-# databases (namespaces) used across the lakehouse
-DATABASES = ["bronze", "silver", "gold", "platinum", "meta"]
+# databases (namespaces) used across the lakehouse. Each namespace gets its own
+# object-storage root so newly created Iceberg tables land in the bucket that
+# matches the medallion layer instead of the catalog-wide default warehouse.
+DATABASE_LOCATIONS = {
+    "bronze": os.environ.get("BRONZE_DB_LOCATION", "s3a://bronze/"),
+    "silver": os.environ.get("SILVER_DB_LOCATION", "s3a://silver/"),
+    "gold": os.environ.get("GOLD_DB_LOCATION", "s3a://gold/"),
+    "platinum": os.environ.get("PLATINUM_DB_LOCATION", "s3a://platinum/"),
+    "meta": os.environ.get("META_DB_LOCATION", "s3a://meta/"),
+}
+DATABASES = list(DATABASE_LOCATIONS)
 
 # local mount where the dataset CSVs live (inside spark/airflow containers)
 DATASET_DIR = "/opt/dataset"

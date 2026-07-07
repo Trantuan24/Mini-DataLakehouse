@@ -22,3 +22,5 @@ SUPERSET_WEBSERVER_TIMEOUT = 120
 # Cache (simple in-memory; fine for a local thesis demo)
 CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache", "CACHE_DEFAULT_TIMEOUT": 300}
 DATA_CACHE_CONFIG = CACHE_CONFIG
+ENABLE_PROXY_FIX = True
+PUBLIC_ROLE_LIKE = "Gamma"

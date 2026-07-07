@@ -8,6 +8,8 @@ fails and the pipeline stops (DQ gate)."""
 from datetime import datetime
 from pyspark.sql import SparkSession, Row
 
+from .iceberg import create_or_replace_iceberg
+
 
 class DQError(Exception):
     pass
@@ -86,8 +88,7 @@ def run_suite(spark: SparkSession, layer: str, results: list, *, persist=True):
             if spark.catalog.tableExists("meta.dq_results"):
                 rows.writeTo("meta.dq_results").append()
             else:
-                (rows.writeTo("meta.dq_results").using("iceberg")
-                     .tableProperty("format-version", "2").createOrReplace())
+                create_or_replace_iceberg(rows, "meta.dq_results")
         except Exception as e:  # don't let logging break the gate
             print(f"  (warning) could not persist dq_results: {e}")
 

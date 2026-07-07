@@ -5,11 +5,11 @@ sys.path.insert(0, "/opt/pipeline")
 from pyspark.sql import functions as F, Window
 from common.spark_session import get_spark, ensure_databases
 from common.job_log import job_log, sum_counts
+from common.iceberg import create_or_replace_iceberg
 
 
 def _write(df, table):
-    (df.writeTo(f"gold.{table}").using("iceberg")
-       .tableProperty("format-version", "2").createOrReplace())
+    create_or_replace_iceberg(df, f"gold.{table}")
     print(f"  wrote gold.{table}: {df.count():,} rows")
 
 

@@ -18,6 +18,8 @@ from datetime import datetime
 
 from pyspark.sql import Row
 
+from .iceberg import create_or_replace_iceberg
+
 JOB_LOG_TABLE = "meta.job_log"
 
 
@@ -52,8 +54,7 @@ def _persist(spark, run_id, layer, job_name, status, rows_in, rows_out,
         if spark.catalog.tableExists(JOB_LOG_TABLE):
             df.writeTo(JOB_LOG_TABLE).append()
         else:
-            (df.writeTo(JOB_LOG_TABLE).using("iceberg")
-               .tableProperty("format-version", "2").createOrReplace())
+            create_or_replace_iceberg(df, JOB_LOG_TABLE)
         print(f"[job_log] {layer}.{job_name} status={status} "
               f"rows_out={rows_out} {duration_sec}s run_id={run_id}")
     except Exception as e:  # never let logging break the job

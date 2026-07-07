@@ -19,9 +19,10 @@ import sys
 sys.path.insert(0, "/opt/pipeline")
 
 from pyspark.sql import functions as F
-from pyspark.sql.functions import current_timestamp, lit, days, months, col, to_timestamp
+from pyspark.sql.functions import current_timestamp, lit, col, to_timestamp
 from common.spark_session import get_spark, ensure_databases
 from common.job_log import job_log, sum_counts
+from common.iceberg import create_or_replace_iceberg
 from common.config import (CSV_TO_TABLE, BRONZE_PARTITIONED, DATASET_DIR,
                            INCREMENTAL_TABLES, WATERMARK_COLUMN, PARTITION_COLUMN,
                            WATERMARK_TABLE,
@@ -71,8 +72,7 @@ def _update_watermark(spark, table, new_value):
         spark.sql(f"DELETE FROM {WATERMARK_TABLE} WHERE table_name = '{table}'")
         rec.writeTo(WATERMARK_TABLE).append()
     else:
-        (rec.writeTo(WATERMARK_TABLE).using("iceberg")
-            .tableProperty("format-version", "2").createOrReplace())
+        create_or_replace_iceberg(rec, WATERMARK_TABLE)
 
 
 def ingest_incremental(spark, table, df):
@@ -100,10 +100,11 @@ def ingest_incremental(spark, table, df):
     print(f"  {cnt:,} new row(s) after watermark")
 
     if not spark.catalog.tableExists(f"bronze.{table}"):
-        (new_rows.writeTo(f"bronze.{table}").using("iceberg")
-            .tableProperty("format-version", "2")
-            .partitionedBy(months(col("_part_ts")))
-            .createOrReplace())
+        create_or_replace_iceberg(
+            new_rows,
+            f"bronze.{table}",
+            partitioned_by="months(_part_ts)",
+        )
     elif cnt > 0:
         new_rows.writeTo(f"bronze.{table}").append()
 
@@ -151,11 +152,14 @@ def main():
             if table in INCREMENTAL_TABLES:
                 ingest_incremental(spark, table, df)
             else:
-                writer = df.writeTo(f"bronze.{table}").using("iceberg") \
-                           .tableProperty("format-version", "2")
+                partitioned_by = ""
                 if table in BRONZE_PARTITIONED:
-                    writer = writer.partitionedBy(days(col("_ingested_at")))
-                writer.createOrReplace()
+                    partitioned_by = "days(_ingested_at)"
+                create_or_replace_iceberg(
+                    df,
+                    f"bronze.{table}",
+                    partitioned_by=partitioned_by,
+                )
                 print(f"  wrote bronze.{table}: {df.count():,} rows")
 
         # showcase Iceberg time-travel on the incremental table
