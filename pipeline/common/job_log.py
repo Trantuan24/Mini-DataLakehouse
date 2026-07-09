@@ -18,7 +18,7 @@ from datetime import datetime
 
 from pyspark.sql import Row
 
-from .iceberg import create_or_replace_iceberg
+from .iceberg import append_iceberg, create_or_replace_iceberg
 
 JOB_LOG_TABLE = "meta.job_log"
 
@@ -52,7 +52,7 @@ def _persist(spark, run_id, layer, job_name, status, rows_in, rows_out,
                   run_timestamp=datetime.utcnow())
         df = spark.createDataFrame([row])
         if spark.catalog.tableExists(JOB_LOG_TABLE):
-            df.writeTo(JOB_LOG_TABLE).append()
+            append_iceberg(df, JOB_LOG_TABLE)
         else:
             create_or_replace_iceberg(df, JOB_LOG_TABLE)
         print(f"[job_log] {layer}.{job_name} status={status} "

@@ -15,7 +15,11 @@
 -- ---------------------------------------------------------------------
 -- 1. Snapshot history: each ingest/replay creates a new Iceberg snapshot.
 -- ---------------------------------------------------------------------
-SELECT snapshot_id, parent_id, operation, committed_at
+SELECT snapshot_id,
+       summary['snapshot_uuid'] AS snapshot_uuid,
+       parent_id,
+       operation,
+       committed_at
 FROM iceberg.bronze."orders$snapshots"
 ORDER BY committed_at;
 
@@ -24,12 +28,12 @@ FROM iceberg.bronze."orders$history"
 ORDER BY made_current_at;
 
 -- Snapshot candidates for manual time-travel.
-SELECT snapshot_id, committed_at, operation
+SELECT snapshot_id, summary['snapshot_uuid'] AS snapshot_uuid, committed_at, operation
 FROM iceberg.bronze."orders$snapshots"
 ORDER BY committed_at
 LIMIT 5;
 
-SELECT snapshot_id, committed_at, operation
+SELECT snapshot_id, summary['snapshot_uuid'] AS snapshot_uuid, committed_at, operation
 FROM iceberg.bronze."orders$snapshots"
 ORDER BY committed_at DESC
 LIMIT 5;
@@ -64,7 +68,7 @@ FROM iceberg.gold.fact_orders
 GROUP BY order_status
 ORDER BY cnt DESC;
 
-SELECT snapshot_id, operation, committed_at
+SELECT snapshot_id, summary['snapshot_uuid'] AS snapshot_uuid, operation, committed_at
 FROM iceberg.gold."fact_orders$snapshots"
 ORDER BY committed_at;
 

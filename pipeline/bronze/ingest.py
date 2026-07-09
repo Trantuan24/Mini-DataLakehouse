@@ -22,7 +22,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import current_timestamp, lit, col, to_timestamp
 from common.spark_session import get_spark, ensure_databases
 from common.job_log import job_log, sum_counts
-from common.iceberg import create_or_replace_iceberg
+from common.iceberg import append_iceberg, create_or_replace_iceberg
 from common.config import (CSV_TO_TABLE, BRONZE_PARTITIONED, DATASET_DIR,
                            INCREMENTAL_TABLES, WATERMARK_COLUMN, PARTITION_COLUMN,
                            WATERMARK_TABLE,
@@ -70,7 +70,7 @@ def _update_watermark(spark, table, new_value):
               .withColumn("updated_at", current_timestamp()))
     if spark.catalog.tableExists(WATERMARK_TABLE):
         spark.sql(f"DELETE FROM {WATERMARK_TABLE} WHERE table_name = '{table}'")
-        rec.writeTo(WATERMARK_TABLE).append()
+        append_iceberg(rec, WATERMARK_TABLE)
     else:
         create_or_replace_iceberg(rec, WATERMARK_TABLE)
 
@@ -106,7 +106,7 @@ def ingest_incremental(spark, table, df):
             partitioned_by="months(_part_ts)",
         )
     elif cnt > 0:
-        new_rows.writeTo(f"bronze.{table}").append()
+        append_iceberg(new_rows, f"bronze.{table}")
 
     if cnt > 0:
         new_max = new_rows.agg(F.max(to_timestamp(col(wm_col)))).collect()[0][0]

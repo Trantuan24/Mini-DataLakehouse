@@ -190,12 +190,27 @@ MinIO cung cấp API tương thích S3. Dự án tạo các bucket:
 
 Iceberg warehouse chính được cấu hình tại `s3a://warehouse/`.
 
-**Lưu ý theo đúng implementation:** các bảng `bronze.*`, `silver.*`, `gold.*`,
-`platinum.*` và `meta.*` hiện đều dùng warehouse mặc định trong bucket
-`warehouse`. Các bucket cùng tên tầng (`bronze`, `silver`, `gold`, `platinum`,
-`meta`) được tạo sẵn nhưng code chưa gán `LOCATION` riêng để lưu từng tầng vào
-từng bucket đó. Bucket `raw` chỉ được sử dụng khi chạy script upload tùy chọn;
-pipeline mặc định đọc CSV từ volume `/opt/dataset` rồi nạp qua PostgreSQL.
+Warehouse này vẫn tồn tại như fallback/catalog warehouse, nhưng implementation
+hiện tại đã pin vị trí vật lý của bảng theo từng tầng:
+
+| Namespace | Vị trí bảng Iceberg |
+|---|---|
+| `bronze.*` | `s3a://bronze/<table>` |
+| `silver.*` | `s3a://silver/<table>` |
+| `gold.*` | `s3a://gold/<table>` |
+| `platinum.*` | `s3a://platinum/<table>` |
+| `meta.*` | `s3a://meta/<table>` |
+
+Mapping nằm trong `pipeline/common/config.py` qua `DATABASE_LOCATIONS`. Khi tạo
+hoặc replace bảng, code dùng helper `pipeline/common/iceberg.py` để phát lệnh
+`CREATE OR REPLACE TABLE ... LOCATION ... AS SELECT ...`. Cách này cần thiết vì
+với Hive Metastore hiện tại, `CREATE DATABASE ... LOCATION` chỉ đáng tin cho
+namespace tạo mới; database đã tồn tại không thể đổi location bằng
+`ALTER DATABASE ... SET LOCATION`.
+
+Bucket `raw` chỉ được sử dụng khi chạy script upload tùy chọn. Pipeline mặc định
+đọc CSV từ volume `/opt/dataset`, seed vào PostgreSQL, rồi Bronze đọc PostgreSQL
+qua JDBC.
 
 ### 4.3. Apache Iceberg 1.5.2
 
@@ -290,6 +305,7 @@ erDiagram
 Mini_LakeHouse/
 ├── dags/                         # Định nghĩa ba Airflow DAG
 ├── pipeline/
+│   ├── admin/                    # Job vận hành một lần như migrate Iceberg location
 │   ├── common/                   # Spark session, config, DQ, job log
 │   ├── bronze/                   # Seed nguồn, replay, ingest, validate
 │   ├── silver/                   # Làm sạch và validate
@@ -310,12 +326,21 @@ Mini_LakeHouse/
 
 ### 6.1. Nhóm `pipeline/common`
 
-- `config.py`: ánh xạ CSV, tên bảng, khóa chính, watermark và cấu hình PostgreSQL.
+- `config.py`: ánh xạ CSV, tên bảng, khóa chính, watermark, PostgreSQL và
+  mapping namespace sang bucket vật lý.
+- `iceberg.py`: helper tạo/replace bảng Iceberg với `LOCATION` đúng bucket tầng.
 - `spark_session.py`: tạo SparkSession có Iceberg extension và tạo các namespace.
 - `data_quality.py`: khung kiểm tra chất lượng tự viết.
 - `job_log.py`: ghi trạng thái, thời lượng và số dòng của từng Spark job.
 
-### 6.2. Các namespace Iceberg
+### 6.2. Nhóm `pipeline/admin`
+
+- `migrate_iceberg_layer_locations.py`: job vận hành để rewrite các bảng Iceberg
+  đã tạo sai dưới `warehouse` sang bucket đúng theo layer. Job này đọc current
+  snapshot, ghi lại bảng vào location mới, kiểm tra row count và đổi tên bảng.
+  Lịch sử snapshot cũ không được giữ lại sau migration.
+
+### 6.3. Các namespace Iceberg
 
 Hệ thống tạo năm namespace:
 
@@ -326,6 +351,11 @@ Hệ thống tạo năm namespace:
 - `meta`
 
 Namespace `meta` lưu dữ liệu điều khiển và quan sát như watermark, kết quả DQ và job log.
+
+Lưu ý vận hành: namespace location có thể vẫn hiển thị `s3a://warehouse/<db>.db`
+trên một metastore cũ vì Hive không hỗ trợ đổi location database đã tồn tại.
+Điều quan trọng là location của **table**; các bảng mới/replace hiện được pin
+trực tiếp bằng helper Iceberg nên không phụ thuộc vào database default location.
 
 ---
 
@@ -370,6 +400,22 @@ Docker healthcheck và `depends_on` đảm bảo thứ tự hợp lý:
 - `airflow-logs`: giữ log của Airflow.
 
 Việc dừng container không làm mất dữ liệu trong volume. Chỉ khi xóa volume thì dữ liệu mới bị xóa.
+
+### 7.3. Spark UI trên VPS
+
+Spark Master UI nằm ở cổng `8080`, Spark Worker UI ở cổng `8081`. Trên môi
+trường Docker, nếu không cấu hình thêm, Master UI có thể render link worker là
+IP nội bộ Docker như `172.18.x.x`, khiến trình duyệt bên ngoài VPS không mở
+được. Dự án dùng biến:
+
+```text
+SPARK_PUBLIC_DNS=<public-ip-or-domain>
+```
+
+để Spark render link Worker/Executor bằng host public. Trên VPS cần mở firewall
+cho `8080/tcp` và `8081/tcp` nếu muốn truy cập trực tiếp. Vì Spark UI không có
+xác thực mặc định, khi không demo nên đóng cổng public hoặc truy cập qua SSH
+tunnel/reverse proxy có bảo vệ.
 
 ---
 
@@ -424,6 +470,14 @@ flowchart LR
 ```
 
 Mỗi Spark task được chạy bằng `spark-submit`. Toàn bộ job trong một lần chạy nhận cùng `RUN_ID` từ Airflow để có thể liên kết log.
+
+Thiết kế này tách rõ từng tầng và từng DQ gate, phù hợp để quan sát, retry và
+giải thích kiến trúc Lakehouse. Đổi lại, mỗi task là một Spark application riêng:
+khởi JVM, tạo SparkSession, đăng ký executor rồi mới chạy xử lý. Trên VPS nhỏ
+một worker hai core, một lần chạy đầy đủ thường mất khoảng 10 phút vì có nhiều
+Spark app nối tiếp, không phải vì Airflow bị treo. Nếu cần chạy nhanh khi phát
+triển, có thể bổ sung một DAG/script "fast path" gộp nhiều bước trong cùng một
+SparkSession; còn DAG hiện tại giữ ưu tiên về observability và DQ gate.
 
 Cấu hình mặc định của DAG:
 
@@ -880,6 +934,8 @@ Idempotent nghĩa là chạy lại cùng một bước không làm sai hoặc nh
 - Replay sử dụng khóa chính và `ON CONFLICT DO NOTHING`.
 - Bronze `orders` chỉ lấy bản ghi sau watermark.
 - Các bảng overwrite dùng `createOrReplace`.
+- Các bảng overwrite được tạo/replace qua helper Iceberg có khai báo `LOCATION`
+  rõ ràng để dữ liệu vật lý nằm đúng bucket layer.
 - Silver khử trùng lặp theo khóa.
 - Gold `fact_orders` dùng `MERGE` theo `order_id`.
 
@@ -898,7 +954,26 @@ tự động reset watermark hay bảng Iceberg.
 
 ## 14. Apache Iceberg trong dự án
 
-### 14.1. Snapshot
+### 14.1. Vị trí vật lý của bảng
+
+Mặc dù catalog warehouse vẫn là `s3a://warehouse/`, các bảng nghiệp vụ không còn
+dựa vào default warehouse. Helper `create_or_replace_iceberg` tạo bảng bằng SQL:
+
+```sql
+CREATE OR REPLACE TABLE <db>.<table>
+USING iceberg
+LOCATION 's3a://<layer>/<table>'
+TBLPROPERTIES ('format-version' = '2')
+AS SELECT ...
+```
+
+Các bảng đã lỡ tạo dưới `warehouse` trước khi sửa location được xử lý bằng
+`pipeline/admin/migrate_iceberg_layer_locations.py`. Script này có chế độ
+`--dry-run` để in ra bảng nào đang ở sai bucket, và chế độ migrate thật để rewrite
+current snapshot sang bucket đúng. Đây là migration dữ liệu hiện hành, không phải
+migration giữ nguyên toàn bộ lịch sử snapshot cũ.
+
+### 14.2. Snapshot
 
 Mỗi lần ghi tạo một snapshot metadata. Có thể xem bằng Trino:
 
@@ -910,7 +985,7 @@ ORDER BY committed_at;
 
 Snapshot cho biết bảng đã thay đổi qua các lần ingest như thế nào.
 
-### 14.2. Time travel
+### 14.3. Time travel
 
 Có thể đọc bảng tại snapshot cũ:
 
@@ -935,11 +1010,11 @@ FOR TIMESTAMP AS OF TIMESTAMP '2026-06-18 00:00:00 UTC';
 - Audit lịch sử.
 - Khôi phục logic phân tích từ trạng thái cũ.
 
-### 14.3. Hidden partitioning
+### 14.4. Hidden partitioning
 
 Pipeline khai báo partition bằng biến đổi `months()` hoặc `days()`. Người dùng truy vấn cột thời gian nghiệp vụ bình thường, Iceberg sử dụng metadata partition để loại các file không cần đọc.
 
-### 14.4. Metadata table
+### 14.5. Metadata table
 
 Ngoài `$snapshots` và `$history`, có thể xem data file:
 
@@ -949,7 +1024,7 @@ FROM iceberg.bronze."orders$files"
 ORDER BY record_count DESC;
 ```
 
-### 14.5. Khác biệt với Parquet thuần
+### 14.6. Khác biệt với Parquet thuần
 
 Parquet chỉ định nghĩa định dạng của từng file. Iceberg cung cấp lớp quản lý bảng phía trên các file Parquet, gồm snapshot, transaction, partition evolution, schema evolution và merge. Vì vậy chọn Iceberg là điểm cốt lõi để dự án thực sự mang tính Lakehouse.
 
@@ -1173,6 +1248,7 @@ docker compose up -d
 | Trino | `http://localhost:8090` | Không xác thực |
 | Superset | `http://localhost:8088` | `admin/admin` |
 | Spark Master UI | `http://localhost:8080` | Không có |
+| Spark Worker UI | `http://localhost:8081` | Không có |
 
 Mật khẩu mặc định chỉ phù hợp môi trường demo. Tuy nhiên, với code hiện tại,
 không thể chỉ đổi `.env`: MinIO credential còn xuất hiện trong hai file
@@ -1180,6 +1256,10 @@ không thể chỉ đổi `.env`: MinIO credential còn xuất hiện trong hai 
 `metastore-site.xml`; hai DAG seed/replay đang truyền trực tiếp tài khoản
 `airflow/airflow`. Khi triển khai thật phải thay đổi đồng bộ các cấu hình này,
 quản lý secret đúng cách và không công khai dịch vụ quản trị.
+
+Khi deploy trên VPS, đặt `SPARK_PUBLIC_DNS` trong `.env` bằng IP public hoặc
+domain đang dùng để mở giao diện. Nếu không, link Worker/Executor trong Spark UI
+có thể trỏ vào IP Docker nội bộ và không truy cập được từ trình duyệt.
 
 ---
 
@@ -1245,6 +1325,8 @@ Giá trị lớn nhất của dự án không nằm ở một KPI đơn lẻ mà
 - DQ framework còn nhẹ, chưa có profiling, cảnh báo theo tỷ lệ hoặc quản lý rule bên ngoài code.
 - Chưa có schema evolution workflow đầy đủ.
 - Chưa có cơ chế compact small files và expire snapshot tự động.
+- Migration location cũ sang bucket layer chỉ rewrite current snapshot, không giữ
+  toàn bộ lịch sử snapshot của các bảng đã migrate.
 - Chưa có phân quyền chi tiết, quản lý secret chuyên dụng và mã hóa production.
 - Một số credential vẫn hard-code ngoài `.env`, nên cơ chế cấu hình secret chưa
   nhất quán.
@@ -1265,6 +1347,8 @@ Giá trị lớn nhất của dự án không nằm ở một KPI đơn lẻ mà
 - Tích hợp OpenLineage/Marquez để theo dõi lineage.
 - Tích hợp dbt hoặc lớp semantic metric.
 - Tự động compact file, rewrite manifest và expire snapshot.
+- Thêm fast-path DAG/script chạy nhiều bước trong một SparkSession để giảm thời
+  gian chạy trên môi trường VPS nhỏ, song song với DAG tách task hiện tại.
 - Bổ sung Slowly Changing Dimension cho thuộc tính thay đổi theo thời gian.
 - Tách PostgreSQL backend thành các instance phù hợp khi triển khai production.
 - Thêm CI/CD để chạy lint, unit test và integration test.
@@ -1335,7 +1419,5 @@ Tài liệu liên quan trong dự án:
 - `docs/iceberg_features_demo.md`: hướng dẫn demo snapshot, time travel và merge.
 - `scripts/iceberg_demo.sql`: các truy vấn Trino mẫu.
 - `notebooks/eda_olist.ipynb`: phân tích khám phá dữ liệu.
-
-
 
 

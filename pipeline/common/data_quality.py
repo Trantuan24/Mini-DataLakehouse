@@ -8,7 +8,7 @@ fails and the pipeline stops (DQ gate)."""
 from datetime import datetime
 from pyspark.sql import SparkSession, Row
 
-from .iceberg import create_or_replace_iceberg
+from .iceberg import append_iceberg, create_or_replace_iceberg
 
 
 class DQError(Exception):
@@ -86,7 +86,7 @@ def run_suite(spark: SparkSession, layer: str, results: list, *, persist=True):
             spark.sql("CREATE DATABASE IF NOT EXISTS meta")
             rows = spark.createDataFrame([Row(**r) for r in results])
             if spark.catalog.tableExists("meta.dq_results"):
-                rows.writeTo("meta.dq_results").append()
+                append_iceberg(rows, "meta.dq_results")
             else:
                 create_or_replace_iceberg(rows, "meta.dq_results")
         except Exception as e:  # don't let logging break the gate
