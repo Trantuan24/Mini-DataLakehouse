@@ -22,7 +22,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import current_timestamp, lit, col, to_timestamp
 from common.spark_session import get_spark, ensure_databases
 from common.job_log import job_log, sum_counts
-from common.iceberg import append_iceberg, create_or_replace_iceberg
+from common.iceberg import append_iceberg, create_or_replace_iceberg, sql_with_snapshot_uuid
 from common.config import (CSV_TO_TABLE, BRONZE_PARTITIONED, DATASET_DIR,
                            INCREMENTAL_TABLES, WATERMARK_COLUMN, PARTITION_COLUMN,
                            WATERMARK_TABLE,
@@ -69,8 +69,16 @@ def _update_watermark(spark, table, new_value):
               .withColumn("watermark_value", F.lit(new_value).cast("timestamp"))
               .withColumn("updated_at", current_timestamp()))
     if spark.catalog.tableExists(WATERMARK_TABLE):
-        current = spark.table(WATERMARK_TABLE).filter(col("table_name") != table)
-        create_or_replace_iceberg(current.unionByName(rec), WATERMARK_TABLE)
+        rec.createOrReplaceTempView("_watermark_src")
+        sql_with_snapshot_uuid(spark, f"""
+            MERGE INTO {WATERMARK_TABLE} t
+            USING _watermark_src s ON t.table_name = s.table_name
+            WHEN MATCHED THEN UPDATE SET
+                watermark_value = s.watermark_value,
+                updated_at = s.updated_at
+            WHEN NOT MATCHED THEN INSERT (table_name, watermark_value, updated_at)
+                VALUES (s.table_name, s.watermark_value, s.updated_at)
+        """)
     else:
         create_or_replace_iceberg(rec, WATERMARK_TABLE)
 

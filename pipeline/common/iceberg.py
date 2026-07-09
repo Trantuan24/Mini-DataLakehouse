@@ -14,18 +14,6 @@ def sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def sql_identifier(value: str) -> str:
-    return "`" + value.replace("`", "``") + "`"
-
-
-def schema_sql(df) -> str:
-    cols = [
-        f"{sql_identifier(field.name)} {field.dataType.simpleString()}"
-        for field in df.schema.fields
-    ]
-    return ",\n                ".join(cols)
-
-
 def new_snapshot_uuid() -> str:
     return str(uuid4())
 
@@ -54,16 +42,21 @@ def sql_with_snapshot_uuid(spark, query: str) -> str:
 
 
 def create_or_replace_iceberg(df, identifier: str, partitioned_by: str = "") -> None:
-    """Create/replace an Iceberg table while pinning its physical LOCATION."""
+    """Create/replace an Iceberg table in one CTAS/RTAS commit.
+
+    The LOCATION is pinned to the medallion-layer bucket. We avoid the previous
+    create-empty-then-append pattern so a failed data write cannot leave an empty
+    replacement table behind.
+    """
     spark = df.sparkSession
+    view_name = "__iceberg_write_src"
     partition_sql = f"PARTITIONED BY ({partitioned_by})" if partitioned_by else ""
-    spark.sql(f"""
-        CREATE OR REPLACE TABLE {identifier} (
-            {schema_sql(df)}
-        )
+    df.createOrReplaceTempView(view_name)
+    sql_with_snapshot_uuid(spark, f"""
+        CREATE OR REPLACE TABLE {identifier}
         USING iceberg
         {partition_sql}
         LOCATION {sql_string(table_location(identifier))}
         TBLPROPERTIES ('format-version' = '2')
+        AS SELECT * FROM {view_name}
     """)
-    append_iceberg(df, identifier)
