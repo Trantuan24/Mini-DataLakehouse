@@ -15,7 +15,7 @@ from datetime import datetime
 sys.path.insert(0, "/opt/pipeline")
 
 from common.config import DATABASE_LOCATIONS
-from common.iceberg import sql_string, sql_with_snapshot_uuid, table_location
+from common.iceberg import create_or_replace_iceberg, sql_string, table_location
 from common.spark_session import ensure_databases, get_spark
 
 
@@ -63,20 +63,12 @@ def _print_plan(spark, identifiers):
 
 def _rewrite_table(spark, source, temp, location):
     partition = PARTITION_SPECS.get(source)
-    partition_sql = "PARTITIONED BY (" + partition + ")" if partition else ""
-    spark.table(source).createOrReplaceTempView("__migration_source")
-    sql_with_snapshot_uuid(spark, """
-        CREATE TABLE {temp}
-        USING iceberg
-        {partition_sql}
-        LOCATION {location}
-        TBLPROPERTIES ('format-version' = '2')
-        AS SELECT * FROM __migration_source
-    """.format(
-        temp=temp,
-        partition_sql=partition_sql,
-        location=sql_string(location),
-    ))
+    create_or_replace_iceberg(
+        spark.table(source),
+        temp,
+        partitioned_by=partition or "",
+        location=location,
+    )
 
 
 def migrate_table(spark, identifier, drop_backup=False):

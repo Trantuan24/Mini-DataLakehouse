@@ -5,7 +5,7 @@ sys.path.insert(0, "/opt/pipeline")
 from pyspark.sql import functions as F
 from common.spark_session import get_spark, ensure_databases
 from common.job_log import job_log, sum_counts
-from common.iceberg import create_or_replace_iceberg, sql_with_snapshot_uuid
+from common.iceberg import create_or_replace_iceberg
 
 
 def _write(df, table):
@@ -45,23 +45,15 @@ def fact_orders(spark):
 
 
 def _upsert_orders(spark, df):
-    """Idempotent upsert on order_id. First run creates the table; afterwards we
-    MERGE so a redelivered/changed order (lifecycle replay) updates IN PLACE
-    instead of being duplicated. MERGE has no delete-by-source clause, which is
-    fine for an append-only replay where the source set only grows."""
+    """Idempotently publish the current order facts.
+
+    Silver already keeps the latest version per order_id. Replacing this fact
+    table from Silver keeps one current row per order while allowing the shared
+    Iceberg writer helper to stamp snapshot_uuid into every new snapshot.
+    """
     table = "gold.fact_orders"
-    if not spark.catalog.tableExists(table):
-        create_or_replace_iceberg(df, table)
-        print(f"  created {table}: {df.count():,} rows")
-        return
-    df.createOrReplaceTempView("_fact_orders_src")
-    sql_with_snapshot_uuid(spark, f"""
-        MERGE INTO {table} t
-        USING _fact_orders_src s ON t.order_id = s.order_id
-        WHEN MATCHED THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
-    """)
-    print(f"  merged {table}: now {spark.table(table).count():,} rows")
+    create_or_replace_iceberg(df, table)
+    print(f"  wrote {table}: {spark.table(table).count():,} rows")
 
 
 def fact_order_items(spark):

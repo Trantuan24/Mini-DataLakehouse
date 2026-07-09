@@ -55,7 +55,7 @@ LIMIT 5;
 -- FOR TIMESTAMP AS OF TIMESTAMP '2026-06-18 00:00:00 UTC';
 
 -- ---------------------------------------------------------------------
--- 3. MERGE INTO evidence on gold.fact_orders.
+-- 3. Fact table idempotency evidence on gold.fact_orders.
 -- Same order_id lifecycle updates must not create duplicate fact rows.
 -- ---------------------------------------------------------------------
 SELECT count(*) AS total_rows,
