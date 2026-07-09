@@ -5,7 +5,7 @@ sys.path.insert(0, "/opt/pipeline")
 from pyspark.sql import functions as F
 from common.spark_session import get_spark, ensure_databases
 from common.job_log import job_log, sum_counts
-from common.iceberg import create_or_replace_iceberg
+from common.iceberg import create_or_replace_iceberg, sql_with_snapshot_uuid
 
 
 def _write(df, table):
@@ -55,7 +55,7 @@ def _upsert_orders(spark, df):
         print(f"  created {table}: {df.count():,} rows")
         return
     df.createOrReplaceTempView("_fact_orders_src")
-    spark.sql(f"""
+    sql_with_snapshot_uuid(spark, f"""
         MERGE INTO {table} t
         USING _fact_orders_src s ON t.order_id = s.order_id
         WHEN MATCHED THEN UPDATE SET *

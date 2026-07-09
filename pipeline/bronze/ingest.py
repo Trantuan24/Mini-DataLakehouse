@@ -69,8 +69,8 @@ def _update_watermark(spark, table, new_value):
               .withColumn("watermark_value", F.lit(new_value).cast("timestamp"))
               .withColumn("updated_at", current_timestamp()))
     if spark.catalog.tableExists(WATERMARK_TABLE):
-        spark.sql(f"DELETE FROM {WATERMARK_TABLE} WHERE table_name = '{table}'")
-        append_iceberg(rec, WATERMARK_TABLE)
+        current = spark.table(WATERMARK_TABLE).filter(col("table_name") != table)
+        create_or_replace_iceberg(current.unionByName(rec), WATERMARK_TABLE)
     else:
         create_or_replace_iceberg(rec, WATERMARK_TABLE)
 

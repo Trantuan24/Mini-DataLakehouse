@@ -14,6 +14,18 @@ def sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def sql_identifier(value: str) -> str:
+    return "`" + value.replace("`", "``") + "`"
+
+
+def schema_sql(df) -> str:
+    cols = [
+        f"{sql_identifier(field.name)} {field.dataType.simpleString()}"
+        for field in df.schema.fields
+    ]
+    return ",\n                ".join(cols)
+
+
 def new_snapshot_uuid() -> str:
     return str(uuid4())
 
@@ -27,22 +39,31 @@ def append_iceberg(df, identifier: str) -> str:
     return snapshot_uuid
 
 
+def sql_with_snapshot_uuid(spark, query: str) -> str:
+    """Run a Spark SQL write while stamping snapshot_uuid into Iceberg summary."""
+    snapshot_uuid = new_snapshot_uuid()
+    props = None
+    try:
+        props = spark._jvm.org.apache.iceberg.spark.CommitMetadata.commitProperties()
+        props.put("snapshot_uuid", snapshot_uuid)
+        spark.sql(query)
+    finally:
+        if props is not None:
+            props.remove("snapshot_uuid")
+    return snapshot_uuid
+
+
 def create_or_replace_iceberg(df, identifier: str, partitioned_by: str = "") -> None:
     """Create/replace an Iceberg table while pinning its physical LOCATION."""
-    view = "__iceberg_write_" + uuid4().hex
-    snapshot_uuid = new_snapshot_uuid()
     spark = df.sparkSession
-    df.createOrReplaceTempView(view)
     partition_sql = f"PARTITIONED BY ({partitioned_by})" if partitioned_by else ""
-    try:
-        spark.sql(f"""
-            CREATE OR REPLACE TABLE {identifier}
-            USING iceberg
-            OPTIONS ('snapshot-property.snapshot_uuid' = {sql_string(snapshot_uuid)})
-            {partition_sql}
-            LOCATION {sql_string(table_location(identifier))}
-            TBLPROPERTIES ('format-version' = '2')
-            AS SELECT * FROM {view}
-        """)
-    finally:
-        spark.catalog.dropTempView(view)
+    spark.sql(f"""
+        CREATE OR REPLACE TABLE {identifier} (
+            {schema_sql(df)}
+        )
+        USING iceberg
+        {partition_sql}
+        LOCATION {sql_string(table_location(identifier))}
+        TBLPROPERTIES ('format-version' = '2')
+    """)
+    append_iceberg(df, identifier)
