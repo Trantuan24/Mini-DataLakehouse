@@ -30,7 +30,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
@@ -53,8 +53,8 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 10s
@@ -75,7 +75,7 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
       mc mb -p local/raw local/bronze local/silver local/gold local/platinum local/warehouse local/meta;
-      mc anonymous set download local/raw;
+      mc anonymous set none local/raw;
       echo 'Buckets created'; exit 0;
       "
     networks:
@@ -102,7 +102,7 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     ports:
-      - "9083:9083"
+      - "127.0.0.1:9083:9083"
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/9083'"]
       interval: 15s
@@ -130,8 +130,8 @@ services:
     command: >
       /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     ports:
-      - "7077:7077"
-      - "8080:8080"
+      - "127.0.0.1:7077:7077"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./pipeline:/opt/pipeline
       - ./dataset:/opt/dataset
@@ -159,7 +159,7 @@ services:
     command: >
       /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     volumes:
       - ./pipeline:/opt/pipeline
       - ./dataset:/opt/dataset
@@ -188,7 +188,7 @@ services:
       S3_ENDPOINT: ${S3_ENDPOINT}
       HIVE_METASTORE_URI: ${HIVE_METASTORE_URI}
     ports:
-      - "8090:8080"
+      - "127.0.0.1:8090:8080"
     volumes:
       - ./docker/trino/catalog:/etc/trino/catalog
     healthcheck:
@@ -256,7 +256,7 @@ services:
     environment: *airflow-common-env
     volumes: *airflow-volumes
     ports:
-      - "8085:8080"
+      - "127.0.0.1:8085:8080"
     command: airflow webserver
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
@@ -312,7 +312,7 @@ services:
     volumes:
       - ./docker/superset/superset_config.py:/app/pythonpath/superset_config.py
     ports:
-      - "8088:8088"
+      - "127.0.0.1:8088:8088"
     networks:
       - lakehouse-net
 
