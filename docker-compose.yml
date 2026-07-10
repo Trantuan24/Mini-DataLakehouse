@@ -214,7 +214,10 @@ services:
         condition: service_healthy
     environment: &airflow-common-env
       <<: *spark-env
+      TZ: ${TZ}
       AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR}
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: ${AIRFLOW__CORE__DEFAULT_TIMEZONE}
+      AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: ${AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
