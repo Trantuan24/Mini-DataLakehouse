@@ -58,13 +58,15 @@ def create_or_replace_iceberg(
     partitioned_by: str = "",
     location: str = "",
 ) -> None:
-    """Create/replace an Iceberg table with snapshot_uuid in the commit summary."""
+    """Create/replace an Iceberg table with pinned location and snapshot_uuid."""
     snapshot_uuid = new_snapshot_uuid()
-    writer = (df.writeTo(identifier)
-                .using("iceberg")
-                .option("path", location or table_location(identifier))
-                .option("snapshot-property.snapshot_uuid", snapshot_uuid)
-                .tableProperty("format-version", "2"))
+    writer = (
+        df.writeTo(identifier)
+        .using("iceberg")
+        .tableProperty("location", location or table_location(identifier))
+        .tableProperty("format-version", "2")
+        .option("snapshot-property.snapshot_uuid", snapshot_uuid)
+    )
     if partitioned_by:
         writer = writer.partitionedBy(*partition_exprs(partitioned_by))
     writer.createOrReplace()

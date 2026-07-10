@@ -95,6 +95,30 @@ bronze[ingest → validate] → silver[transform → validate]
 → gold[dims → facts → validate] → platinum[marts] → run_etl_tests → notify_done
 ```
 
+### Chạy kịch bản full và replay
+
+`scripts/run_mode.sh` chuẩn bị hai kịch bản mà không để state của kịch bản trước
+trộn vào kịch bản sau. Lệnh `--reset` xóa các bảng/snapshot Iceberg, watermark và
+replay cursor; dữ liệu `raw/` cùng các CSV trong `dataset/` được giữ nguyên.
+
+```bash
+# Xem trước các bước, không đổi dữ liệu
+scripts/run_mode.sh full --reset --dry-run
+
+# Baseline đầy đủ: reset -> seed đủ 9 bảng -> chạy pipeline
+scripts/run_mode.sh full --reset --confirm-reset
+
+# Bắt đầu demo incremental: reset -> seed dim -> phát hành tháng đầu -> pipeline
+scripts/run_mode.sh replay --reset --confirm-reset --lifecycle 1
+
+# Đi tiếp một tháng trong demo đang có
+scripts/run_mode.sh replay --next --lifecycle 1
+```
+
+Script chờ source DAG thành công trước khi trigger `lakehouse_pipeline`; có thể
+dùng `--no-pipeline` để chỉ chuẩn bị nguồn mà không chạy pipeline tự động. Nếu có
+DAG cùng loại đang chạy, script sẽ dừng trước khi trigger thêm run mới.
+
 <p align="center"><img src="images/airflow_dag.png" width="820"/></p>
 <!-- TODO: thêm ảnh chụp DAG lakehouse_pipeline chạy thành công vào images/airflow_dag.png -->
 

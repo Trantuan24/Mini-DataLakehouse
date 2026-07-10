@@ -27,6 +27,12 @@ def get_spark(app_name: str = "lakehouse-job") -> SparkSession:
         )
         .config("spark.sql.catalog.spark_catalog.type", "hive")
     )
+    if master.startswith("local"):
+        builder = (
+            builder
+            .config("spark.driver.host", os.environ.get("SPARK_DRIVER_HOST", "localhost"))
+            .config("spark.driver.bindAddress", os.environ.get("SPARK_DRIVER_BIND_ADDRESS", "127.0.0.1"))
+        )
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark
